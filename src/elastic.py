@@ -3,9 +3,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 
-vp_path  = "MODEL_P-WAVE_VELOCITY_1.25m.segy"
-vs_path  = "MODEL_S-WAVE_VELOCITY_1.25m.segy"
-rho_path = "MODEL_DENSITY_1.25m.segy"
+vp_path  = "../data/MODEL_P-WAVE_VELOCITY_1.25m.segy"
+vs_path  = "../data/MODEL_S-WAVE_VELOCITY_1.25m.segy"
+rho_path = "../data/MODEL_DENSITY_1.25m.segy"
 
 def load_segy(path):
     with segyio.open(path, "r", ignore_geometry=True) as f:
