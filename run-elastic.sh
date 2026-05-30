@@ -1,4 +1,3 @@
-
 #!/bin/bash
 #SBATCH --job-name=seismic-wave-equation-2d
 ##SBATCH --nodes=2
@@ -13,4 +12,4 @@ module load python/3.11.9
 source .venv/bin/activate
 
 cd src/
-python3 elastic.py
+python elastic.py

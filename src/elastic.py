@@ -8,9 +8,9 @@ import matplotlib.pyplot as plt
 # =========================
 # User settings
 # =========================
-n_iterations = 6000        # total number of time steps
+n_iterations = 60000       # total number of time steps
 frame_stride = 10          # save one frame every this many iterations
-ds = 8                     # downsampling factor
+ds = 1                     # downsampling factor
 frames_dir = "../frames"   # output folder for PNG frames
 
 vp_path  = "../data/MODEL_P-WAVE_VELOCITY_1.25m.segy"
