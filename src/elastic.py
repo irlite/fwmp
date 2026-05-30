@@ -1,17 +1,31 @@
+import os
 import segyio
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
+
+# =========================
+# User settings
+# =========================
+n_iterations = 6000        # total number of time steps
+frame_stride = 10          # save one frame every this many iterations
+ds = 8                     # downsampling factor
+frames_dir = "../frames"   # output folder for PNG frames
 
 vp_path  = "../data/MODEL_P-WAVE_VELOCITY_1.25m.segy"
 vs_path  = "../data/MODEL_S-WAVE_VELOCITY_1.25m.segy"
 rho_path = "../data/MODEL_DENSITY_1.25m.segy"
 
+os.makedirs(frames_dir, exist_ok=True)
+for fname in os.listdir(frames_dir):
+    if fname.endswith(".png"):
+        os.remove(os.path.join(frames_dir, fname))
+
 def load_segy(path):
     with segyio.open(path, "r", ignore_geometry=True) as f:
         return np.stack([np.array(tr) for tr in f.trace]).T
 
-ds = 8
 vp0  = load_segy(vp_path)[::ds, ::ds].astype(np.float32)
 vs0  = load_segy(vs_path)[::ds, ::ds].astype(np.float32)
 rho0 = load_segy(rho_path)[::ds, ::ds].astype(np.float32)
@@ -56,10 +70,10 @@ inv_rho = (1.0 / rho).astype(np.float32)
 
 vp_max = float(vp.max())
 dt = 0.4 * dx / vp_max
-nt = 6000
 
 print(f"dt={dt*1000:.4f} ms  dx={dx:.2f} m  CFL={vp_max*dt/dx:.3f}")
 print(f"nz0={nz0} nx0={nx0}  nz={nz} nx={nx}")
+print(f"n_iterations={n_iterations}  frame_stride={frame_stride}")
 
 f0 = 8.0
 t0 = 1.2 / f0
@@ -108,6 +122,7 @@ src_z  = pad_top  + src_z0
 
 def step(it):
     global vx, vz, sxx, szz, sxz
+
     src = src_amp * ricker(it * dt)
     sxx[src_z, src_x] += src
     szz[src_z, src_x] += src
@@ -182,21 +197,25 @@ axv.set_ylabel("Depth (m)")
 axv.plot(src_x0 * dx, src_z0 * dz, "w*", markersize=8)
 fig.colorbar(im_v, cax=caxv, label="Velocity (m/s)")
 
-steps_per_frame = 10
+frame_id = 0
 
-def update(frame):
-    for _ in range(steps_per_frame):
-        step(update.it)
-        update.it += 1
-    view = physical_view(vz)
-    m = float(np.max(np.abs(view)))
-    print(f"it={update.it}  max(vz)={m:.6e}")
-    if m > 1e-20:
-        im_w.set_clim(-0.6 * m, 0.6 * m)
-    im_w.set_data(view)
-    axw.set_title(f"Elastic Wavefield — Vz | Time = {update.it * dt * 1000:.1f} ms")
-    return (im_w,)
+for it in range(n_iterations):
+    step(it)
 
-update.it = 0
-ani = FuncAnimation(fig, update, frames=nt // steps_per_frame, interval=30, blit=False)
-plt.show()
+    if it % frame_stride == 0:
+        view = physical_view(vz)
+        m = float(np.max(np.abs(view)))
+        print(f"it={it}  max(vz)={m:.6e}")
+
+        if m > 1e-20:
+            im_w.set_clim(-0.6 * m, 0.6 * m)
+
+        im_w.set_data(view)
+        axw.set_title(f"Elastic Wavefield — Vz | Time = {it * dt * 1000:.1f} ms")
+
+        outpath = os.path.join(frames_dir, f"frame_{frame_id:05d}.png")
+        fig.savefig(outpath, dpi=150)
+        frame_id += 1
+
+plt.close(fig)
+print(f"Saved {frame_id} frames to {frames_dir}")
