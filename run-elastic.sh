@@ -1,3 +1,4 @@
+
 #!/bin/bash
 #SBATCH --job-name=seismic-wave-equation-2d
 ##SBATCH --nodes=2
@@ -5,10 +6,11 @@
 ##SBATCH --ntasks-per-node=1
 #SBATCH --time=01:30:00
 #SBATCH --output=seismic-wave-equation_%j.out
-
+#SBATCH --partition=scc-cpu
 
 module load python/3.11.9
 
-pip install segyio numpy matplotlib
+source .venv/bin/activate
 
-python ./src/elastic.py
+cd src/
+python3 elastic.py
