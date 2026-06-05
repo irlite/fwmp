@@ -1,9 +1,7 @@
 import os
 import segyio
+import h5py
 import numpy as np
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 from mpi4py import MPI
 
 comm = MPI.COMM_WORLD
@@ -12,16 +10,16 @@ size = comm.Get_size()
 n_iterations = 6000
 frame_stride = 10
 ds = 8
-frames_dir = "../frames"
+output_dir = "../output"
+h5_path = os.path.join(output_dir, "elastic_wavefield.h5")
 vp_path = "../data/MODEL_P-WAVE_VELOCITY_1.25m.segy"
 vs_path = "../data/MODEL_S-WAVE_VELOCITY_1.25m.segy"
 rho_path = "../data/MODEL_DENSITY_1.25m.segy"
 
 if rank == 0:
-    os.makedirs(frames_dir, exist_ok=True)
-    for fname in os.listdir(frames_dir):
-        if fname.endswith(".png"):
-            os.remove(os.path.join(frames_dir, fname))
+    os.makedirs(output_dir, exist_ok=True)
+    if os.path.exists(h5_path):
+        os.remove(h5_path)
 comm.Barrier()
 
 def load_segy(path):
@@ -72,9 +70,9 @@ nz0, nx0 = vp0.shape
 dx = dz = 1.25 * ds
 
 if rank == 0:
-    print(f"Vp  min={vp0.min():.1f}  max={vp0.max():.1f}")
-    print(f"Vs  min={vs0.min():.1f}  max={vs0.max():.1f}")
-    print(f"Rho min={rho0.min():.1f}  max={rho0.max():.1f}")
+    print(f"Vp  min={vp0.min():.1f}  max={vp0.max():.1f}", flush=True)
+    print(f"Vs  min={vs0.min():.1f}  max={vs0.max():.1f}", flush=True)
+    print(f"Rho min={rho0.min():.1f}  max={rho0.max():.1f}", flush=True)
 
 zmax_plot_m = 3500.0
 nz_plot = min(nz0, int(round(zmax_plot_m / dz)) + 1)
@@ -107,10 +105,10 @@ vp_max = float(vp.max())
 dt = 0.4 * dx / vp_max
 
 if rank == 0:
-    print(f"dt={dt*1000:.4f} ms  dx={dx:.2f} m  CFL={vp_max*dt/dx:.3f}")
-    print(f"nz0={nz0} nx0={nx0}  nz={nz} nx={nx}")
-    print(f"n_iterations={n_iterations}  frame_stride={frame_stride}")
-    print(f"MPI ranks={size}")
+    print(f"dt={dt*1000:.4f} ms  dx={dx:.2f} m  CFL={vp_max*dt/dx:.3f}", flush=True)
+    print(f"nz0={nz0} nx0={nx0}  nz={nz} nx={nx}", flush=True)
+    print(f"n_iterations={n_iterations}  frame_stride={frame_stride}", flush=True)
+    print(f"MPI ranks={size}", flush=True)
 
 f0 = 8.0
 t0 = 1.2 / f0
@@ -153,9 +151,9 @@ if nx_loc <= 0:
     raise RuntimeError(f"Rank {rank} has nx_loc={nx_loc}. Use fewer MPI ranks than global x-columns.")
 
 if rank == 0:
-    print("x_counts per rank:", x_counts)
+    print("x_counts per rank:", x_counts, flush=True)
 
-print(f"rank {rank}: x_start={x_start}, x_end={x_end}, nx_loc={nx_loc}")
+print(f"rank {rank}: x_start={x_start}, x_end={x_end}, nx_loc={nx_loc}", flush=True)
 comm.Barrier()
 
 mu_loc = add_halo_columns(mu[:, x_start:x_end])
@@ -216,36 +214,44 @@ def physical_view_global(field):
     f = field[pad_top:pad_top+nz0, pad_left:pad_left+nx0]
     return f[:nz_plot, :]
 
+n_frames = len(range(0, n_iterations, frame_stride))
+
 if rank == 0:
-    vel_view = vp0[:nz_plot, :]
-    x_extent = (nx0 - 1) * dx
-    z_extent = zmax_plot_m
-    main_width = 12
-    main_height = main_width * (z_extent / x_extent)
-    fig = plt.figure(figsize=(main_width + 1.4, 2.0 * main_height), constrained_layout=True)
-    gs = fig.add_gridspec(2, 2, width_ratios=[1.0, 0.06], height_ratios=[1.0, 1.0])
-    axw = fig.add_subplot(gs[0, 0])
-    caxw = fig.add_subplot(gs[0, 1])
-    axv = fig.add_subplot(gs[1, 0])
-    caxv = fig.add_subplot(gs[1, 1])
-    initial_view = np.zeros((nz_plot, nx0), dtype=np.float32)
-    im_w = axw.imshow(initial_view, cmap="seismic", extent=[0, x_extent, z_extent, 0], aspect="equal", vmin=-1e-3, vmax=1e-3)
-    axw.set_title("Elastic Wavefield — Vz")
-    axw.set_xlabel("Distance (m)")
-    axw.set_ylabel("Depth (m)")
-    axw.plot(src_x0 * dx, src_z0 * dz, "k*", markersize=8)
-    fig.colorbar(im_w, cax=caxw, label="Vz (m/s)")
-    im_v = axv.imshow(vel_view, cmap="jet", extent=[0, x_extent, z_extent, 0], aspect="equal")
-    axv.set_title("Vp Model")
-    axv.set_xlabel("Distance (m)")
-    axv.set_ylabel("Depth (m)")
-    axv.plot(src_x0 * dx, src_z0 * dz, "w*", markersize=8)
-    fig.colorbar(im_v, cax=caxv, label="Velocity (m/s)")
+    h5 = h5py.File(h5_path, "w")
+    dset_vz = h5.create_dataset(
+        "vz",
+        shape=(n_frames, nz_plot, nx0),
+        dtype=np.float32,
+        chunks=(1, nz_plot, nx0),
+        compression="gzip",
+        compression_opts=4,
+        shuffle=True,
+    )
+    h5.create_dataset(
+        "vp",
+        data=vp0[:nz_plot, :].astype(np.float32),
+        compression="gzip",
+        compression_opts=4,
+        shuffle=True,
+    )
+    times = np.arange(n_frames, dtype=np.float32) * frame_stride * dt
+    h5.create_dataset("time", data=times)
+    h5.attrs["dx"] = dx
+    h5.attrs["dz"] = dz
+    h5.attrs["dt"] = dt
+    h5.attrs["frame_stride"] = frame_stride
+    h5.attrs["n_frames"] = n_frames
+    h5.attrs["nz_plot"] = nz_plot
+    h5.attrs["nx0"] = nx0
+    h5.attrs["zmax_plot_m"] = zmax_plot_m
+    h5.attrs["src_x0"] = src_x0
+    h5.attrs["src_z0"] = src_z0
     frame_id = 0
+    print(f"Writing HDF5 output to {h5_path}", flush=True)
+    print(f"HDF5 vz dataset shape: {dset_vz.shape}", flush=True)
 else:
-    fig = None
-    im_w = None
-    axw = None
+    h5 = None
+    dset_vz = None
     frame_id = None
 
 for it in range(n_iterations):
@@ -253,17 +259,15 @@ for it in range(n_iterations):
     if it % frame_stride == 0:
         vz_global = gather_global_field(vz)
         if rank == 0:
-            view = physical_view_global(vz_global)
+            view = physical_view_global(vz_global).astype(np.float32, copy=False)
             m = float(np.max(np.abs(view)))
-            print(f"it={it}  max(vz)={m:.6e}")
-            if m > 1e-20:
-                im_w.set_clim(-0.6 * m, 0.6 * m)
-            im_w.set_data(view)
-            axw.set_title(f"Elastic Wavefield — Vz | Time = {it * dt * 1000:.1f} ms")
-            outpath = os.path.join(frames_dir, f"frame_{frame_id:05d}.png")
-            fig.savefig(outpath, dpi=150)
+            print(f"it={it}  frame={frame_id}/{n_frames}  max(vz)={m:.6e}", flush=True)
+            dset_vz[frame_id, :, :] = view
+            if frame_id % 10 == 0:
+                h5.flush()
             frame_id += 1
 
 if rank == 0:
-    plt.close(fig)
-    print(f"Saved {frame_id} frames to {frames_dir}")
+    h5.flush()
+    h5.close()
+    print(f"Saved {frame_id} frames to {h5_path}", flush=True)
