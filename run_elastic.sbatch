@@ -1,0 +1,30 @@
+#!/bin/bash
+#SBATCH -p scc-cpu
+#SBATCH -N 2
+#SBATCH --ntasks-per-node=8
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=32G
+#SBATCH --time=00:05:00
+#SBATCH --job-name=elastic
+#SBATCH --output=elastic_%j.out
+#SBATCH --error=elastic_%j.err
+
+set -e
+
+module purge
+module load gcc
+module load openmpi
+module load python
+
+cd ~/fwmp
+source .venv/bin/activate
+cd src
+
+export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export NUMBA_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export NUMBA_THREADING_LAYER=omp
+
+srun --distribution=block:block --cpu-bind=cores python -u elastic.py

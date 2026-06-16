@@ -1,12 +1,13 @@
 #!/bin/bash
+set -e
 
 module purge
 module load gcc
 module load openmpi
 module load python
 
-cd ~/fwmp
 source .venv/bin/activate
 
-cd src/
-mpirun -np 4 python -u elastic.py
+python -m pip install --upgrade pip
+
+python -m pip install numpy numba mpi4py h5py segyio matplotlib

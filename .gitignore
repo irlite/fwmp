@@ -1,5 +1,6 @@
 frames/
 output/
+src/__pycache__/
 *.out
 *.err
 

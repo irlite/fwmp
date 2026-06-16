@@ -2,10 +2,11 @@ import sys
 import h5py
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
+from matplotlib.animation import FuncAnimation, FFMpegWriter
 
 def main():
     h5_path = sys.argv[1] if len(sys.argv) > 1 else "../output/elastic_wavefield.h5"
+    output_path = sys.argv[2] if len(sys.argv) > 2 else "../output/elastic_wavefield.webm"
     h5 = h5py.File(h5_path, "r")
     vz = h5["vz"]
     vp = h5["vp"][:]
@@ -59,8 +60,18 @@ def main():
         axw.set_title(f"Elastic Wavefield — Vz | frame {i + 1}/{n_frames} | t = {t_ms:.1f} ms | max = {m:.2e}")
         return (im_w,)
 
-    anim = FuncAnimation(fig, update, frames=n_frames, interval=40, blit=False, repeat=True)
-    plt.show()
+    anim = FuncAnimation(fig, update, frames=n_frames, interval=40, blit=False, repeat=False)
+
+    writer = FFMpegWriter(fps=25, bitrate=2000,
+                          codec="libvpx-vp9",
+                          extra_args=["-pix_fmt", "yuv420p"])
+
+    print(f"Saving animation to: {output_path}")
+    anim.save(output_path, writer=writer, dpi=150,
+              progress_callback=lambda i, n: print(f"\r  frame {i + 1}/{n}", end="", flush=True))
+    print("\nDone.")
+
+    plt.close(fig)
     h5.close()
 
 if __name__ == "__main__":
