@@ -1,10 +1,9 @@
 import os
 import glob
+import ctypes
 import segyio
 import h5py
 import numpy as np
-from numba.openmp import njit
-from numba.openmp import openmp_context as openmp
 from mpi4py import MPI
 
 comm = MPI.COMM_WORLD
@@ -24,6 +23,29 @@ rank_h5_path = os.path.join(output_dir, f"elastic_wavefield_rank{rank:04d}.h5")
 vp_path = "../data/MODEL_P-WAVE_VELOCITY_1.25m.segy"
 vs_path = "../data/MODEL_S-WAVE_VELOCITY_1.25m.segy"
 rho_path = "../data/MODEL_DENSITY_1.25m.segy"
+
+lib = ctypes.CDLL(os.path.join(os.path.dirname(__file__), "libelastic_kernels.so"))
+_float2 = np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags="C_CONTIGUOUS")
+
+lib.update_stress.argtypes = [
+    _float2, _float2,
+    _float2, _float2, _float2,
+    _float2, _float2, _float2, _float2,
+    ctypes.c_float, ctypes.c_float, ctypes.c_float,
+    ctypes.c_int, ctypes.c_int,
+    ctypes.c_int, ctypes.c_int
+]
+lib.update_stress.restype = None
+
+lib.update_velocity.argtypes = [
+    _float2, _float2,
+    _float2, _float2, _float2,
+    _float2, _float2,
+    ctypes.c_float, ctypes.c_float, ctypes.c_float,
+    ctypes.c_int, ctypes.c_int,
+    ctypes.c_int, ctypes.c_int
+]
+lib.update_velocity.restype = None
 
 if rank == 0:
     os.makedirs(output_dir, exist_ok=True)
@@ -105,39 +127,11 @@ def report_timing(name, value):
     if rank == 0:
         print(f"TIMING {name:18s} min={vmin:10.3f}s  avg={vsum/size:10.3f}s  max={vmax:10.3f}s", flush=True)
 
-@njit(fastmath=True, cache=True)
-def update_stress_numba(vx, vz, sxx, szz, sxz, lam, lam2mu, mu, damp, dt, dx, dz, jx0, jx1):
-    nz = vx.shape[0]
-    with openmp("parallel for collapse(2) schedule(static) private(i,j,dvx_dx,dvx_dz,dvz_dx,dvz_dz,d)"):
-        for i in range(1, nz - 1):
-            for j in range(jx0, jx1):
-                dvx_dx = (vx[i, j + 1] - vx[i, j]) / dx
-                dvx_dz = (vx[i + 1, j] - vx[i, j]) / dz
-                dvz_dx = (vz[i, j + 1] - vz[i, j]) / dx
-                dvz_dz = (vz[i + 1, j] - vz[i, j]) / dz
-                sxx[i, j] += dt * (lam2mu[i, j] * dvx_dx + lam[i, j] * dvz_dz)
-                szz[i, j] += dt * (lam[i, j] * dvx_dx + lam2mu[i, j] * dvz_dz)
-                sxz[i, j] += dt * mu[i, j] * (dvx_dz + dvz_dx)
-                d = damp[i, j]
-                sxx[i, j] *= d
-                szz[i, j] *= d
-                sxz[i, j] *= d
+def update_stress_c(vx, vz, sxx, szz, sxz, lam, lam2mu, mu, damp, dt, dx, dz, jx0, jx1):
+    lib.update_stress(vx, vz, sxx, szz, sxz, lam, lam2mu, mu, damp, np.float32(dt), np.float32(dx), np.float32(dz), vx.shape[0], vx.shape[1], jx0, jx1)
 
-@njit(fastmath=True, cache=True)
-def update_velocity_numba(vx, vz, sxx, szz, sxz, inv_rho, damp, dt, dx, dz, jx0, jx1):
-    nz = vx.shape[0]
-    with openmp("parallel for collapse(2) schedule(static) private(i,j,dsxx_dx,dsxz_dz,dsxz_dx,dszz_dz,d)"):
-        for i in range(1, nz - 1):
-            for j in range(jx0, jx1):
-                dsxx_dx = (sxx[i, j] - sxx[i, j - 1]) / dx
-                dsxz_dz = (sxz[i, j] - sxz[i - 1, j]) / dz
-                dsxz_dx = (sxz[i, j] - sxz[i, j - 1]) / dx
-                dszz_dz = (szz[i, j] - szz[i - 1, j]) / dz
-                vx[i, j] += dt * inv_rho[i, j] * (dsxx_dx + dsxz_dz)
-                vz[i, j] += dt * inv_rho[i, j] * (dsxz_dx + dszz_dz)
-                d = damp[i, j]
-                vx[i, j] *= d
-                vz[i, j] *= d
+def update_velocity_c(vx, vz, sxx, szz, sxz, inv_rho, damp, dt, dx, dz, jx0, jx1):
+    lib.update_velocity(vx, vz, sxx, szz, sxz, inv_rho, damp, np.float32(dt), np.float32(dx), np.float32(dz), vx.shape[0], vx.shape[1], jx0, jx1)
 
 t_load_start = MPI.Wtime()
 vp0 = load_segy(vp_path)[::ds, ::ds].astype(np.float32)
@@ -241,11 +235,11 @@ if rank == 0:
 print(f"rank {rank}: x_start={x_start}, x_end={x_end}, nx_loc={nx_loc}", flush=True)
 comm.Barrier()
 
-mu_loc = add_halo_columns(mu[:, x_start:x_end])
-lam_loc = add_halo_columns(lam[:, x_start:x_end])
-lam2mu_loc = add_halo_columns(lam2mu[:, x_start:x_end])
-inv_rho_loc = add_halo_columns(inv_rho[:, x_start:x_end])
-damp_loc = add_halo_columns(damp[:, x_start:x_end])
+mu_loc = np.ascontiguousarray(add_halo_columns(mu[:, x_start:x_end]), dtype=np.float32)
+lam_loc = np.ascontiguousarray(add_halo_columns(lam[:, x_start:x_end]), dtype=np.float32)
+lam2mu_loc = np.ascontiguousarray(add_halo_columns(lam2mu[:, x_start:x_end]), dtype=np.float32)
+inv_rho_loc = np.ascontiguousarray(add_halo_columns(inv_rho[:, x_start:x_end]), dtype=np.float32)
+damp_loc = np.ascontiguousarray(add_halo_columns(damp[:, x_start:x_end]), dtype=np.float32)
 vx = np.zeros((nz, nx_loc + 2), dtype=np.float32)
 vz = np.zeros((nz, nx_loc + 2), dtype=np.float32)
 sxx = np.zeros((nz, nx_loc + 2), dtype=np.float32)
@@ -317,8 +311,8 @@ h5.attrs["src_z0"] = src_z0
 t_h5setup = MPI.Wtime() - t_h5setup_start
 
 t_jit_start = MPI.Wtime()
-update_stress_numba(vx, vz, sxx, szz, sxz, lam_loc, lam2mu_loc, mu_loc, damp_loc, dt, dx, dz, jx0_update, jx1_update)
-update_velocity_numba(vx, vz, sxx, szz, sxz, inv_rho_loc, damp_loc, dt, dx, dz, jx0_update, jx1_update)
+update_stress_c(vx, vz, sxx, szz, sxz, lam_loc, lam2mu_loc, mu_loc, damp_loc, dt, dx, dz, jx0_update, jx1_update)
+update_velocity_c(vx, vz, sxx, szz, sxz, inv_rho_loc, damp_loc, dt, dx, dz, jx0_update, jx1_update)
 vx.fill(0.0)
 vz.fill(0.0)
 sxx.fill(0.0)
@@ -329,7 +323,7 @@ t_jit = MPI.Wtime() - t_jit_start
 
 if rank == 0:
     print(f"Writing per-rank HDF5 files to {output_dir}", flush=True)
-    print(f"PyOMP/OpenMP OMP_NUM_THREADS={os.environ.get('OMP_NUM_THREADS', 'runtime default')}", flush=True)
+    print(f"C/OpenMP OMP_NUM_THREADS={os.environ.get('OMP_NUM_THREADS', 'runtime default')}", flush=True)
 
 def step(it):
     global vx, vz, sxx, szz, sxz
@@ -343,9 +337,9 @@ def step(it):
             vz[src_z, local_src_x] += np.float32(dt * inv_rho_loc[src_z, local_src_x] * src)
         if debug and it % debug_source_every == 0:
             print(f"rank {rank} it={it} src={float(src):.6e} local_src_x={local_src_x} sxx_src={float(sxx[src_z, local_src_x]):.6e} vz_src={float(vz[src_z, local_src_x]):.6e}", flush=True)
-    update_stress_numba(vx, vz, sxx, szz, sxz, lam_loc, lam2mu_loc, mu_loc, damp_loc, dt, dx, dz, jx0_update, jx1_update)
+    update_stress_c(vx, vz, sxx, szz, sxz, lam_loc, lam2mu_loc, mu_loc, damp_loc, dt, dx, dz, jx0_update, jx1_update)
     exchange_halo_x3(sxx, szz, sxz)
-    update_velocity_numba(vx, vz, sxx, szz, sxz, inv_rho_loc, damp_loc, dt, dx, dz, jx0_update, jx1_update)
+    update_velocity_c(vx, vz, sxx, szz, sxz, inv_rho_loc, damp_loc, dt, dx, dz, jx0_update, jx1_update)
 
 frame_id = 0
 t_step_sum = 0.0
@@ -406,7 +400,7 @@ if rank == 0:
 report_timing("segy_load", t_load)
 report_timing("setup", t_setup)
 report_timing("hdf5_setup", t_h5setup)
-report_timing("numba_jit", t_jit)
+report_timing("kernel_warmup", t_jit)
 report_timing("step_sum", t_step_sum)
 report_timing("io_sum", t_io_sum)
 report_timing("loop_total", t_loop)
@@ -422,7 +416,7 @@ if rank == 0:
     actual_output_bytes = sum(os.path.getsize(path) for path in rank_files)
     grid_updates = n_iterations * nz * nx
     print(f"BENCH ranks={size}", flush=True)
-    print(f"BENCH pyomp_omp_num_threads={os.environ.get('OMP_NUM_THREADS', 'runtime default')}", flush=True)
+    print(f"BENCH c_openmp_threads={os.environ.get('OMP_NUM_THREADS', 'runtime default')}", flush=True)
     print(f"BENCH grid_padded nz={nz} nx={nx} points={nz*nx}", flush=True)
     print(f"BENCH frames={n_frames} nz_plot={nz_plot} nx0={nx0}", flush=True)
     print(f"BENCH logical_vz_output={logical_output_bytes/1024**2:.2f} MiB", flush=True)

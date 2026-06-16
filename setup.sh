@@ -6,6 +6,8 @@ module load gcc
 module load openmpi
 module load python
 
+gcc -O3 -fopenmp -shared -fPIC src/elastic_kernels.c -o src/libelastic_kernels.so
+
 source .venv/bin/activate
 
 python -m pip install --upgrade pip

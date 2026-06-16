@@ -4,9 +4,11 @@
 
 First create and install the Python environment:
 
-./venv_setup.sh
+./setup.sh
 
 This installs all required Python dependencies into the local .venv.
+
+It also compiles the C kernels.
 
 ---
 

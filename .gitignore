@@ -1,6 +1,7 @@
 frames/
 output/
 src/__pycache__/
+src/libelastic_kernels.so
 *.out
 *.err
 

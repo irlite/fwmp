@@ -21,10 +21,10 @@ source .venv/bin/activate
 cd src
 
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export OMP_PROC_BIND=close
+export OMP_PLACES=cores
 export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
-export NUMBA_NUM_THREADS=$SLURM_CPUS_PER_TASK
-export NUMBA_THREADING_LAYER=omp
 
 srun --distribution=block:block --cpu-bind=cores python -u elastic.py
