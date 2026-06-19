@@ -12,6 +12,8 @@ set -e
 module purge
 module load gcc
 module load python
+module load openmpi
+module load scorep
 
 source .venv/bin/activate
 cd src

@@ -10,7 +10,7 @@ module load scorep
 scorep gcc -O3 -fopenmp -shared -fPIC src/elastic_kernels.c -o src/libelastic_kernels.so
 
 #gcc -O3 -shared -fPIC src/elastic_kernels_single_threaded.c -o src/libelastic_kernels_single_threaded.so
-scorep gcc -O3 -shared -fPIC elastic_kernels_single_threaded.c -o libelastic_kernels_single_threaded.so
+scorep gcc -O3 -shared -fPIC src/elastic_kernels_single_threaded.c -o src/libelastic_kernels_single_threaded.so
 
 source .venv/bin/activate
 

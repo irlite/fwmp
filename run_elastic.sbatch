@@ -15,6 +15,7 @@ module purge
 module load gcc
 module load openmpi
 module load python
+module load scorep
 
 cd ~/fwmp
 source .venv/bin/activate
