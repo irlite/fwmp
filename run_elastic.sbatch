@@ -4,7 +4,6 @@
 #SBATCH --ntasks-per-node=8
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
-#SBATCH --contiguous
 #SBATCH --time=00:20:00
 #SBATCH --job-name=elastic
 #SBATCH --output=elastic_%j.out
@@ -27,5 +26,8 @@ export OMP_PLACES=cores
 export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
+export SCOREP_ENABLE_TRACING=1
 
-srun --distribution=block:block --cpu-bind=cores python -u elastic.py
+export SCOREP_EXPERIMENT_DIRECTORY=scorep_trace_run1
+
+srun --distribution=block:block --cpu-bind=cores python -m scorep -u elastic.py
