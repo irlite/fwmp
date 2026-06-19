@@ -4,12 +4,9 @@ import ctypes
 import segyio
 import h5py
 import numpy as np
-from mpi4py import MPI
+import time
 
-comm = MPI.COMM_WORLD
-rank = comm.Get_rank()
-size = comm.Get_size()
-t_total_start = MPI.Wtime()
+t_total_start = time.perf_counter()
 
 n_iterations = int(os.environ.get("FWMP_NITER", "6000"))
 frame_stride = int(os.environ.get("FWMP_FRAME_STRIDE", "10"))
@@ -19,12 +16,12 @@ debug_source_every = int(os.environ.get("FWMP_DEBUG_SOURCE_EVERY", "100"))
 ds = 4
 output_dir = "../output"
 vds_path = os.path.join(output_dir, "elastic_wavefield.h5")
-rank_h5_path = os.path.join(output_dir, f"elastic_wavefield_rank{rank:04d}.h5")
+rank_h5_path = os.path.join(output_dir, "elastic_wavefield_single.h5")
 vp_path = "../data/MODEL_P-WAVE_VELOCITY_1.25m.segy"
 vs_path = "../data/MODEL_S-WAVE_VELOCITY_1.25m.segy"
 rho_path = "../data/MODEL_DENSITY_1.25m.segy"
 
-lib = ctypes.CDLL(os.path.join(os.path.dirname(__file__), "libelastic_kernels.so"))
+lib = ctypes.CDLL(os.path.join(os.path.dirname(__file__), "libelastic_kernels_single_threaded.so"))
 _float2 = np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags="C_CONTIGUOUS")
 
 lib.update_stress.argtypes = [
@@ -47,24 +44,17 @@ lib.update_velocity.argtypes = [
 ]
 lib.update_velocity.restype = None
 
-if rank == 0:
-    os.makedirs(output_dir, exist_ok=True)
-    for path in glob.glob(os.path.join(output_dir, "elastic_wavefield_rank*.h5")):
-        os.remove(path)
-    if os.path.exists(vds_path):
-        os.remove(vds_path)
-comm.Barrier()
+os.makedirs(output_dir, exist_ok=True)
+for path in glob.glob(os.path.join(output_dir, "elastic_wavefield_rank*.h5")):
+    os.remove(path)
+for path in glob.glob(os.path.join(output_dir, "elastic_wavefield_single.h5")):
+    os.remove(path)
+if os.path.exists(vds_path):
+    os.remove(vds_path)
 
 def load_segy(path):
     with segyio.open(path, "r", ignore_geometry=True) as f:
         return np.stack([np.array(tr) for tr in f.trace]).T
-
-def split_1d(total_columns, size, rank):
-    counts = [total_columns // size + (1 if r < total_columns % size else 0) for r in range(size)]
-    starts = np.cumsum([0] + counts[:-1])
-    start = int(starts[rank])
-    end = int(start + counts[rank])
-    return start, end, counts
 
 def add_halo_columns(a):
     out = np.empty((a.shape[0], a.shape[1] + 2), dtype=a.dtype)
@@ -85,63 +75,8 @@ def make_halo_buffers(n0, dtype=np.float32):
         "x3_recv_right": np.empty((n0, 3), dtype=dtype),
     }
 
-def exchange_halo_x2(a, b, bufs):
-    left = rank - 1 if rank > 0 else MPI.PROC_NULL
-    right = rank + 1 if rank < size - 1 else MPI.PROC_NULL
-
-    send_left = bufs["x2_send_left"]
-    recv_left = bufs["x2_recv_left"]
-    send_right = bufs["x2_send_right"]
-    recv_right = bufs["x2_recv_right"]
-
-    send_left[:, 0] = a[:, 1]
-    send_left[:, 1] = b[:, 1]
-    comm.Sendrecv(sendbuf=send_left, dest=left, sendtag=10, recvbuf=recv_right, source=right, recvtag=10)
-    if right != MPI.PROC_NULL:
-        a[:, -1] = recv_right[:, 0]
-        b[:, -1] = recv_right[:, 1]
-
-    send_right[:, 0] = a[:, -2]
-    send_right[:, 1] = b[:, -2]
-    comm.Sendrecv(sendbuf=send_right, dest=right, sendtag=20, recvbuf=recv_left, source=left, recvtag=20)
-    if left != MPI.PROC_NULL:
-        a[:, 0] = recv_left[:, 0]
-        b[:, 0] = recv_left[:, 1]
-
-def exchange_halo_x3(a, b, c, bufs):
-    left = rank - 1 if rank > 0 else MPI.PROC_NULL
-    right = rank + 1 if rank < size - 1 else MPI.PROC_NULL
-
-    send_left = bufs["x3_send_left"]
-    recv_left = bufs["x3_recv_left"]
-    send_right = bufs["x3_send_right"]
-    recv_right = bufs["x3_recv_right"]
-
-    send_left[:, 0] = a[:, 1]
-    send_left[:, 1] = b[:, 1]
-    send_left[:, 2] = c[:, 1]
-    comm.Sendrecv(sendbuf=send_left, dest=left, sendtag=10, recvbuf=recv_right, source=right, recvtag=10)
-    if right != MPI.PROC_NULL:
-        a[:, -1] = recv_right[:, 0]
-        b[:, -1] = recv_right[:, 1]
-        c[:, -1] = recv_right[:, 2]
-
-    send_right[:, 0] = a[:, -2]
-    send_right[:, 1] = b[:, -2]
-    send_right[:, 2] = c[:, -2]
-    comm.Sendrecv(sendbuf=send_right, dest=right, sendtag=20, recvbuf=recv_left, source=left, recvtag=20)
-    if left != MPI.PROC_NULL:
-        a[:, 0] = recv_left[:, 0]
-        b[:, 0] = recv_left[:, 1]
-        c[:, 0] = recv_left[:, 2]
-
 def report_timing(name, value):
-    value = float(value)
-    vmin = comm.reduce(value, op=MPI.MIN, root=0)
-    vmax = comm.reduce(value, op=MPI.MAX, root=0)
-    vsum = comm.reduce(value, op=MPI.SUM, root=0)
-    if rank == 0:
-        print(f"TIMING {name:18s} min={vmin:10.3f}s  avg={vsum/size:10.3f}s  max={vmax:10.3f}s", flush=True)
+    print(f"TIMING {name:18s} time={float(value):10.3f}s", flush=True)
 
 def update_stress_c(vx, vz, sxx, szz, sxz, lam, lam2mu, mu, damp, dt, dx, dz, jx0, jx1):
     lib.update_stress(vx, vz, sxx, szz, sxz, lam, lam2mu, mu, damp, np.float32(dt), np.float32(dx), np.float32(dz), vx.shape[0], vx.shape[1], jx0, jx1)
@@ -149,21 +84,20 @@ def update_stress_c(vx, vz, sxx, szz, sxz, lam, lam2mu, mu, damp, dt, dx, dz, jx
 def update_velocity_c(vx, vz, sxx, szz, sxz, inv_rho, damp, dt, dx, dz, jx0, jx1):
     lib.update_velocity(vx, vz, sxx, szz, sxz, inv_rho, damp, np.float32(dt), np.float32(dx), np.float32(dz), vx.shape[0], vx.shape[1], jx0, jx1)
 
-t_load_start = MPI.Wtime()
+t_load_start = time.perf_counter()
 vp0 = load_segy(vp_path)[::ds, ::ds].astype(np.float32)
 vs0 = load_segy(vs_path)[::ds, ::ds].astype(np.float32)
 rho0 = load_segy(rho_path)[::ds, ::ds].astype(np.float32)
-t_load = MPI.Wtime() - t_load_start
+t_load = time.perf_counter() - t_load_start
 
-t_setup_start = MPI.Wtime()
+t_setup_start = time.perf_counter()
 nz0, nx0 = vp0.shape
 dx = np.float32(1.25 * ds)
 dz = np.float32(1.25 * ds)
 
-if rank == 0:
-    print(f"Vp  min={vp0.min():.1f}  max={vp0.max():.1f}", flush=True)
-    print(f"Vs  min={vs0.min():.1f}  max={vs0.max():.1f}", flush=True)
-    print(f"Rho min={rho0.min():.1f}  max={rho0.max():.1f}", flush=True)
+print(f"Vp  min={vp0.min():.1f}  max={vp0.max():.1f}", flush=True)
+print(f"Vs  min={vs0.min():.1f}  max={vs0.max():.1f}", flush=True)
+print(f"Rho min={rho0.min():.1f}  max={rho0.max():.1f}", flush=True)
 
 zmax_plot_m = 3500.0
 nz_plot = min(nz0, int(round(zmax_plot_m / float(dz))) + 1)
@@ -195,12 +129,11 @@ inv_rho = (1.0 / rho).astype(np.float32)
 vp_max = float(vp.max())
 dt = np.float32(0.4 * float(dx) / vp_max)
 
-if rank == 0:
-    print(f"dt={float(dt)*1000:.4f} ms  dx={float(dx):.2f} m  CFL={vp_max*float(dt)/float(dx):.3f}", flush=True)
-    print(f"nz0={nz0} nx0={nx0}  nz={nz} nx={nx}", flush=True)
-    print(f"n_iterations={n_iterations}  frame_stride={frame_stride}", flush=True)
-    print(f"MPI ranks={size}", flush=True)
-    print(f"debug={debug} direct_vz_source={direct_vz_source}", flush=True)
+print(f"dt={float(dt)*1000:.4f} ms  dx={float(dx):.2f} m  CFL={vp_max*float(dt)/float(dx):.3f}", flush=True)
+print(f"nz0={nz0} nx0={nx0}  nz={nz} nx={nx}", flush=True)
+print(f"n_iterations={n_iterations}  frame_stride={frame_stride}", flush=True)
+print(f"Ranks=1", flush=True)
+print(f"debug={debug} direct_vz_source={direct_vz_source}", flush=True)
 
 f0 = np.float32(8.0)
 src_t0 = np.float32(1.2 / f0)
@@ -236,26 +169,23 @@ for i in range(pad_bottom):
     sigma[-1-i, :] = np.maximum(sigma[-1-i, :], sigma_bottom_max * r[pad_bottom - 1 - i])
 
 damp = np.clip(1.0 - sigma * float(dt), 0.0, 1.0).astype(np.float32)
-x_start, x_end, x_counts = split_1d(nx, size, rank)
-nx_loc = x_end - x_start
 
-if nx_loc <= 0:
-    raise RuntimeError(f"Rank {rank} has nx_loc={nx_loc}. Use fewer MPI ranks than global x-columns.")
+# Single rank owns the entire domain
+x_start = 0
+x_end = nx
+nx_loc = nx
+owns_src = True
+src_owner = 0
 
-owns_src = int(x_start <= src_x < x_end)
-src_owner = comm.allreduce(rank if owns_src else -1, op=MPI.MAX)
+print("x_counts per rank:", [nx], flush=True)
+print(f"src_x0={src_x0} src_z0={src_z0} src_x={src_x} src_z={src_z} src_t0={float(src_t0):.6e} src_owner={src_owner}", flush=True)
+print(f"x_start={x_start}, x_end={x_end}, nx_loc={nx_loc}", flush=True)
 
-if rank == 0:
-    print("x_counts per rank:", x_counts, flush=True)
-    print(f"src_x0={src_x0} src_z0={src_z0} src_x={src_x} src_z={src_z} src_t0={float(src_t0):.6e} src_owner={src_owner}", flush=True)
-print(f"rank {rank}: x_start={x_start}, x_end={x_end}, nx_loc={nx_loc}", flush=True)
-comm.Barrier()
-
-mu_loc = np.ascontiguousarray(add_halo_columns(mu[:, x_start:x_end]), dtype=np.float32)
-lam_loc = np.ascontiguousarray(add_halo_columns(lam[:, x_start:x_end]), dtype=np.float32)
-lam2mu_loc = np.ascontiguousarray(add_halo_columns(lam2mu[:, x_start:x_end]), dtype=np.float32)
-inv_rho_loc = np.ascontiguousarray(add_halo_columns(inv_rho[:, x_start:x_end]), dtype=np.float32)
-damp_loc = np.ascontiguousarray(add_halo_columns(damp[:, x_start:x_end]), dtype=np.float32)
+mu_loc = np.ascontiguousarray(add_halo_columns(mu), dtype=np.float32)
+lam_loc = np.ascontiguousarray(add_halo_columns(lam), dtype=np.float32)
+lam2mu_loc = np.ascontiguousarray(add_halo_columns(lam2mu), dtype=np.float32)
+inv_rho_loc = np.ascontiguousarray(add_halo_columns(inv_rho), dtype=np.float32)
+damp_loc = np.ascontiguousarray(add_halo_columns(damp), dtype=np.float32)
 vx = np.zeros((nz, nx_loc + 2), dtype=np.float32)
 vz = np.zeros((nz, nx_loc + 2), dtype=np.float32)
 sxx = np.zeros((nz, nx_loc + 2), dtype=np.float32)
@@ -299,8 +229,8 @@ if has_physical_output:
 else:
     chunk_x = 1
 
-t_setup = MPI.Wtime() - t_setup_start
-t_h5setup_start = MPI.Wtime()
+t_setup = time.perf_counter() - t_setup_start
+t_h5setup_start = time.perf_counter()
 h5 = h5py.File(rank_h5_path, "w")
 
 if has_physical_output:
@@ -311,8 +241,8 @@ else:
 
 times = np.arange(n_frames, dtype=np.float32) * frame_stride * dt
 h5.create_dataset("time", data=times)
-h5.attrs["rank"] = rank
-h5.attrs["size"] = size
+h5.attrs["rank"] = 0
+h5.attrs["size"] = 1
 h5.attrs["x0"] = out_x0
 h5.attrs["x1"] = out_x1
 h5.attrs["local_nx_phys"] = local_nx_phys
@@ -326,9 +256,9 @@ h5.attrs["nx0"] = nx0
 h5.attrs["zmax_plot_m"] = zmax_plot_m
 h5.attrs["src_x0"] = src_x0
 h5.attrs["src_z0"] = src_z0
-t_h5setup = MPI.Wtime() - t_h5setup_start
+t_h5setup = time.perf_counter() - t_h5setup_start
 
-t_jit_start = MPI.Wtime()
+t_jit_start = time.perf_counter()
 update_stress_c(vx, vz, sxx, szz, sxz, lam_loc, lam2mu_loc, mu_loc, damp_loc, dt, dx, dz, jx0_update, jx1_update)
 update_velocity_c(vx, vz, sxx, szz, sxz, inv_rho_loc, damp_loc, dt, dx, dz, jx0_update, jx1_update)
 vx.fill(0.0)
@@ -336,40 +266,35 @@ vz.fill(0.0)
 sxx.fill(0.0)
 szz.fill(0.0)
 sxz.fill(0.0)
-comm.Barrier()
-t_jit = MPI.Wtime() - t_jit_start
+t_jit = time.perf_counter() - t_jit_start
 
-if rank == 0:
-    print(f"Writing per-rank HDF5 files to {output_dir}", flush=True)
-    print(f"C/OpenMP OMP_NUM_THREADS={os.environ.get('OMP_NUM_THREADS', 'runtime default')}", flush=True)
+print(f"Writing HDF5 file to {output_dir}", flush=True)
+print(f"C/OpenMP OMP_NUM_THREADS={os.environ.get('OMP_NUM_THREADS', 'runtime default')}", flush=True)
 
 def step(it):
     global vx, vz, sxx, szz, sxz
-    exchange_halo_x2(vx, vz, halo_bufs)
     src = np.float32(src_amp * ricker(np.float32(it) * dt))
-    if x_start <= src_x < x_end:
-        local_src_x = src_x - x_start + 1
-        sxx[src_z, local_src_x] += src
-        szz[src_z, local_src_x] += src
-        if direct_vz_source:
-            vz[src_z, local_src_x] += np.float32(dt * inv_rho_loc[src_z, local_src_x] * src)
-        if debug and it % debug_source_every == 0:
-            print(f"rank {rank} it={it} src={float(src):.6e} local_src_x={local_src_x} sxx_src={float(sxx[src_z, local_src_x]):.6e} vz_src={float(vz[src_z, local_src_x]):.6e}", flush=True)
+    local_src_x = src_x - x_start + 1
+    sxx[src_z, local_src_x] += src
+    szz[src_z, local_src_x] += src
+    if direct_vz_source:
+        vz[src_z, local_src_x] += np.float32(dt * inv_rho_loc[src_z, local_src_x] * src)
+    if debug and it % debug_source_every == 0:
+        print(f"it={it} src={float(src):.6e} local_src_x={local_src_x} sxx_src={float(sxx[src_z, local_src_x]):.6e} vz_src={float(vz[src_z, local_src_x]):.6e}", flush=True)
     update_stress_c(vx, vz, sxx, szz, sxz, lam_loc, lam2mu_loc, mu_loc, damp_loc, dt, dx, dz, jx0_update, jx1_update)
-    exchange_halo_x3(sxx, szz, sxz, halo_bufs)
     update_velocity_c(vx, vz, sxx, szz, sxz, inv_rho_loc, damp_loc, dt, dx, dz, jx0_update, jx1_update)
 
 frame_id = 0
 t_step_sum = 0.0
 t_io_sum = 0.0
-t_loop_start = MPI.Wtime()
+t_loop_start = time.perf_counter()
 
 for it in range(n_iterations):
-    tic = MPI.Wtime()
+    tic = time.perf_counter()
     step(it)
-    t_step_sum += MPI.Wtime() - tic
+    t_step_sum += time.perf_counter() - tic
     if it % frame_stride == 0:
-        tic = MPI.Wtime()
+        tic = time.perf_counter()
         if has_physical_output:
             local_view = np.ascontiguousarray(vz[pad_top:pad_top+nz_plot, local_j0:local_j1], dtype=np.float32)
             dset_vz[frame_id, :, :] = local_view
@@ -382,38 +307,28 @@ for it in range(n_iterations):
             local_full_sxx = np.array(np.max(np.abs(sxx[:, 1:-1])), dtype=np.float32)
             local_full_szz = np.array(np.max(np.abs(szz[:, 1:-1])), dtype=np.float32)
             local_full_sxz = np.array(np.max(np.abs(sxz[:, 1:-1])), dtype=np.float32)
-            global_full_vx = np.array(0.0, dtype=np.float32)
-            global_full_vz = np.array(0.0, dtype=np.float32)
-            global_full_sxx = np.array(0.0, dtype=np.float32)
-            global_full_szz = np.array(0.0, dtype=np.float32)
-            global_full_sxz = np.array(0.0, dtype=np.float32)
-            comm.Reduce(local_full_vx, global_full_vx, op=MPI.MAX, root=0)
-            comm.Reduce(local_full_vz, global_full_vz, op=MPI.MAX, root=0)
-            comm.Reduce(local_full_sxx, global_full_sxx, op=MPI.MAX, root=0)
-            comm.Reduce(local_full_szz, global_full_szz, op=MPI.MAX, root=0)
-            comm.Reduce(local_full_sxz, global_full_sxz, op=MPI.MAX, root=0)
-        global_saved_vz = np.array(0.0, dtype=np.float32)
-        comm.Reduce(local_saved_vz, global_saved_vz, op=MPI.MAX, root=0)
-        if rank == 0:
-            if debug:
-                print(f"it={it} frame={frame_id}/{n_frames} saved_vz={float(global_saved_vz):.6e} full_vx={float(global_full_vx):.6e} full_vz={float(global_full_vz):.6e} full_sxx={float(global_full_sxx):.6e} full_szz={float(global_full_szz):.6e} full_sxz={float(global_full_sxz):.6e}", flush=True)
-            else:
-                print(f"it={it}  frame={frame_id}/{n_frames}  max(vz)={float(global_saved_vz):.6e}", flush=True)
+            global_full_vx = local_full_vx
+            global_full_vz = local_full_vz
+            global_full_sxx = local_full_sxx
+            global_full_szz = local_full_szz
+            global_full_sxz = local_full_sxz
+        global_saved_vz = local_saved_vz
+        if debug:
+            print(f"it={it} frame={frame_id}/{n_frames} saved_vz={float(global_saved_vz):.6e} full_vx={float(global_full_vx):.6e} full_vz={float(global_full_vz):.6e} full_sxx={float(global_full_sxx):.6e} full_szz={float(global_full_szz):.6e} full_sxz={float(global_full_sxz):.6e}", flush=True)
+        else:
+            print(f"it={it}  frame={frame_id}/{n_frames}  max(vz)={float(global_saved_vz):.6e}", flush=True)
         if frame_id % 10 == 0:
             h5.flush()
         frame_id += 1
-        t_io_sum += MPI.Wtime() - tic
+        t_io_sum += time.perf_counter() - tic
 
-t_loop = MPI.Wtime() - t_loop_start
-t_close_start = MPI.Wtime()
+t_loop = time.perf_counter() - t_loop_start
+t_close_start = time.perf_counter()
 h5.flush()
 h5.close()
-t_close = MPI.Wtime() - t_close_start
-comm.Barrier()
-t_total = MPI.Wtime() - t_total_start
+t_close = time.perf_counter() - t_close_start
 
-if rank == 0:
-    print(f"Saved {frame_id} frames per active rank", flush=True)
+print(f"Saved {frame_id} frames", flush=True)
 
 report_timing("segy_load", t_load)
 report_timing("setup", t_setup)
@@ -423,24 +338,24 @@ report_timing("step_sum", t_step_sum)
 report_timing("io_sum", t_io_sum)
 report_timing("loop_total", t_loop)
 report_timing("hdf5_close", t_close)
-report_timing("total", t_total)
+report_timing("total", time.perf_counter() - t_total_start)
 
-max_step = comm.reduce(t_step_sum, op=MPI.MAX, root=0)
-max_io = comm.reduce(t_io_sum, op=MPI.MAX, root=0)
+max_step = t_step_sum
+max_io = t_io_sum
 
-if rank == 0:
-    logical_output_bytes = n_frames * nz_plot * nx0 * np.dtype(np.float32).itemsize
-    rank_files = sorted(glob.glob(os.path.join(output_dir, "elastic_wavefield_rank*.h5")))
-    actual_output_bytes = sum(os.path.getsize(path) for path in rank_files)
-    grid_updates = n_iterations * nz * nx
-    print(f"BENCH ranks={size}", flush=True)
-    print(f"BENCH c_openmp_threads={os.environ.get('OMP_NUM_THREADS', 'runtime default')}", flush=True)
-    print(f"BENCH grid_padded nz={nz} nx={nx} points={nz*nx}", flush=True)
-    print(f"BENCH frames={n_frames} nz_plot={nz_plot} nx0={nx0}", flush=True)
-    print(f"BENCH logical_vz_output={logical_output_bytes/1024**2:.2f} MiB", flush=True)
-    print(f"BENCH actual_rank_h5_size={actual_output_bytes/1024**2:.2f} MiB", flush=True)
-    if max_step > 0.0:
-        print(f"BENCH padded_grid_updates_per_second={grid_updates/max_step:.6e}", flush=True)
-    if max_io > 0.0:
-        print(f"BENCH logical_vz_io_rate={logical_output_bytes/max_io/1024**2:.2f} MiB/s", flush=True)
-    print("Run combine_hdf5.py to create the virtual combined HDF5 file", flush=True)
+logical_output_bytes = n_frames * nz_plot * nx0 * np.dtype(np.float32).itemsize
+rank_files = [rank_h5_path]
+actual_output_bytes = sum(os.path.getsize(path) for path in rank_files)
+grid_updates = n_iterations * nz * nx
+
+print(f"BENCH ranks=1", flush=True)
+print(f"BENCH c_openmp_threads={os.environ.get('OMP_NUM_THREADS', 'runtime default')}", flush=True)
+print(f"BENCH grid_padded nz={nz} nx={nx} points={nz*nx}", flush=True)
+print(f"BENCH frames={n_frames} nz_plot={nz_plot} nx0={nx0}", flush=True)
+print(f"BENCH logical_vz_output={logical_output_bytes/1024**2:.2f} MiB", flush=True)
+print(f"BENCH actual_rank_h5_size={actual_output_bytes/1024**2:.2f} MiB", flush=True)
+if max_step > 0.0:
+    print(f"BENCH padded_grid_updates_per_second={grid_updates/max_step:.6e}", flush=True)
+if max_io > 0.0:
+    print(f"BENCH logical_vz_io_rate={logical_output_bytes/max_io/1024**2:.2f} MiB/s", flush=True)
+print("Run combine_hdf5.py to create the virtual combined HDF5 file", flush=True)

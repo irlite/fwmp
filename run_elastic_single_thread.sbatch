@@ -17,4 +17,4 @@ module load python
 
 source .venv/bin/activate
 cd src
-python -u elastic.py
+python -u elastic_single_threaded.py
