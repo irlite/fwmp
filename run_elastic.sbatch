@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -p scc-cpu
 #SBATCH -N 1
-#SBATCH --ntasks-per-node=2
+#SBATCH --ntasks-per-node=8
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --contiguous
