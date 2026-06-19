@@ -6,7 +6,6 @@ void update_stress(
     int nz, int nx,
     int jx0, int jx1
 ) {
-    #pragma omp parallel for collapse(2) schedule(static)
     for (int i = 1; i < nz - 1; ++i) {
         for (int j = jx0; j < jx1; ++j) {
             int k = i * nx + j;
