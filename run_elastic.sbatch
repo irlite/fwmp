@@ -4,7 +4,6 @@
 #SBATCH --ntasks-per-node=8
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
-#SBATCH --contiguous
 #SBATCH --time=00:20:00
 #SBATCH --job-name=elastic
 #SBATCH --output=elastic_%j.out
