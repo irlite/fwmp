@@ -1,10 +1,11 @@
 #!/bin/bash
 #SBATCH -p scc-cpu
-#SBATCH -N 2
-#SBATCH --ntasks-per-node=8
-#SBATCH --cpus-per-task=12
+#SBATCH -N 1
+#SBATCH --ntasks-per-node=2
+#SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
-#SBATCH --time=00:05:00
+#SBATCH --contiguous
+#SBATCH --time=00:20:00
 #SBATCH --job-name=elastic
 #SBATCH --output=elastic_%j.out
 #SBATCH --error=elastic_%j.err

@@ -16,7 +16,7 @@ frame_stride = int(os.environ.get("FWMP_FRAME_STRIDE", "10"))
 debug = int(os.environ.get("FWMP_DEBUG", "0"))
 direct_vz_source = int(os.environ.get("FWMP_DIRECT_VZ_SOURCE", "0"))
 debug_source_every = int(os.environ.get("FWMP_DEBUG_SOURCE_EVERY", "100"))
-ds = 8
+ds = 4
 output_dir = "../output"
 vds_path = os.path.join(output_dir, "elastic_wavefield.h5")
 rank_h5_path = os.path.join(output_dir, f"elastic_wavefield_rank{rank:04d}.h5")
@@ -73,46 +73,62 @@ def add_halo_columns(a):
     out[:, -1] = out[:, -2]
     return out
 
-def exchange_halo_x2(a, b):
+def make_halo_buffers(n0, dtype=np.float32):
+    return {
+        "x2_send_left":  np.empty((n0, 2), dtype=dtype),
+        "x2_recv_left":  np.empty((n0, 2), dtype=dtype),
+        "x2_send_right": np.empty((n0, 2), dtype=dtype),
+        "x2_recv_right": np.empty((n0, 2), dtype=dtype),
+        "x3_send_left":  np.empty((n0, 3), dtype=dtype),
+        "x3_recv_left":  np.empty((n0, 3), dtype=dtype),
+        "x3_send_right": np.empty((n0, 3), dtype=dtype),
+        "x3_recv_right": np.empty((n0, 3), dtype=dtype),
+    }
+
+def exchange_halo_x2(a, b, bufs):
     left = rank - 1 if rank > 0 else MPI.PROC_NULL
     right = rank + 1 if rank < size - 1 else MPI.PROC_NULL
-    n0 = a.shape[0]
-    send_left = np.empty((n0, 2), dtype=a.dtype)
+
+    send_left = bufs["x2_send_left"]
+    recv_left = bufs["x2_recv_left"]
+    send_right = bufs["x2_send_right"]
+    recv_right = bufs["x2_recv_right"]
+
     send_left[:, 0] = a[:, 1]
     send_left[:, 1] = b[:, 1]
-    recv_right = np.empty((n0, 2), dtype=a.dtype)
     comm.Sendrecv(sendbuf=send_left, dest=left, sendtag=10, recvbuf=recv_right, source=right, recvtag=10)
     if right != MPI.PROC_NULL:
         a[:, -1] = recv_right[:, 0]
         b[:, -1] = recv_right[:, 1]
-    send_right = np.empty((n0, 2), dtype=a.dtype)
+
     send_right[:, 0] = a[:, -2]
     send_right[:, 1] = b[:, -2]
-    recv_left = np.empty((n0, 2), dtype=a.dtype)
     comm.Sendrecv(sendbuf=send_right, dest=right, sendtag=20, recvbuf=recv_left, source=left, recvtag=20)
     if left != MPI.PROC_NULL:
         a[:, 0] = recv_left[:, 0]
         b[:, 0] = recv_left[:, 1]
 
-def exchange_halo_x3(a, b, c):
+def exchange_halo_x3(a, b, c, bufs):
     left = rank - 1 if rank > 0 else MPI.PROC_NULL
     right = rank + 1 if rank < size - 1 else MPI.PROC_NULL
-    n0 = a.shape[0]
-    send_left = np.empty((n0, 3), dtype=a.dtype)
+
+    send_left = bufs["x3_send_left"]
+    recv_left = bufs["x3_recv_left"]
+    send_right = bufs["x3_send_right"]
+    recv_right = bufs["x3_recv_right"]
+
     send_left[:, 0] = a[:, 1]
     send_left[:, 1] = b[:, 1]
     send_left[:, 2] = c[:, 1]
-    recv_right = np.empty((n0, 3), dtype=a.dtype)
     comm.Sendrecv(sendbuf=send_left, dest=left, sendtag=10, recvbuf=recv_right, source=right, recvtag=10)
     if right != MPI.PROC_NULL:
         a[:, -1] = recv_right[:, 0]
         b[:, -1] = recv_right[:, 1]
         c[:, -1] = recv_right[:, 2]
-    send_right = np.empty((n0, 3), dtype=a.dtype)
+
     send_right[:, 0] = a[:, -2]
     send_right[:, 1] = b[:, -2]
     send_right[:, 2] = c[:, -2]
-    recv_left = np.empty((n0, 3), dtype=a.dtype)
     comm.Sendrecv(sendbuf=send_right, dest=right, sendtag=20, recvbuf=recv_left, source=left, recvtag=20)
     if left != MPI.PROC_NULL:
         a[:, 0] = recv_left[:, 0]
@@ -246,6 +262,8 @@ sxx = np.zeros((nz, nx_loc + 2), dtype=np.float32)
 szz = np.zeros((nz, nx_loc + 2), dtype=np.float32)
 sxz = np.zeros((nz, nx_loc + 2), dtype=np.float32)
 
+halo_bufs = make_halo_buffers(nz, dtype=np.float32)
+
 jx0_update = 1
 jx1_update = nx_loc + 1
 if x_start == 0:
@@ -327,7 +345,7 @@ if rank == 0:
 
 def step(it):
     global vx, vz, sxx, szz, sxz
-    exchange_halo_x2(vx, vz)
+    exchange_halo_x2(vx, vz, halo_bufs)
     src = np.float32(src_amp * ricker(np.float32(it) * dt))
     if x_start <= src_x < x_end:
         local_src_x = src_x - x_start + 1
@@ -338,7 +356,7 @@ def step(it):
         if debug and it % debug_source_every == 0:
             print(f"rank {rank} it={it} src={float(src):.6e} local_src_x={local_src_x} sxx_src={float(sxx[src_z, local_src_x]):.6e} vz_src={float(vz[src_z, local_src_x]):.6e}", flush=True)
     update_stress_c(vx, vz, sxx, szz, sxz, lam_loc, lam2mu_loc, mu_loc, damp_loc, dt, dx, dz, jx0_update, jx1_update)
-    exchange_halo_x3(sxx, szz, sxz)
+    exchange_halo_x3(sxx, szz, sxz, halo_bufs)
     update_velocity_c(vx, vz, sxx, szz, sxz, inv_rho_loc, damp_loc, dt, dx, dz, jx0_update, jx1_update)
 
 frame_id = 0

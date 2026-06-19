@@ -1,4 +1,5 @@
 frames/
+previous_runs/
 output/
 src/__pycache__/
 src/libelastic_kernels.so
