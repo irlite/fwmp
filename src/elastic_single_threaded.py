@@ -21,7 +21,7 @@ vp_path = "../data/MODEL_P-WAVE_VELOCITY_1.25m.segy"
 vs_path = "../data/MODEL_S-WAVE_VELOCITY_1.25m.segy"
 rho_path = "../data/MODEL_DENSITY_1.25m.segy"
 
-lib = ctypes.CDLL(os.path.join(os.path.dirname(__file__), "libelastic_kernels_single_threaded.so"))
+lib = ctypes.CDLL(os.path.join(os.path.dirname(os.path.abspath(__file__)), "libelastic_kernels_single_threaded.so"))
 _float2 = np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags="C_CONTIGUOUS")
 
 lib.update_stress.argtypes = [
