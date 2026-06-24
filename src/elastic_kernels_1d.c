@@ -17,6 +17,8 @@ void update_stress(
 
     if (iz0 < 1) iz0 = 1;
     if (iz1 > nz - 1) iz1 = nz - 1;
+    if (jx0 < 1) jx0 = 1;
+    if (jx1 > nx - 1) jx1 = nx - 1;
 
     #pragma omp parallel for schedule(static)
     for (int i = iz0; i < iz1; ++i) {
@@ -62,6 +64,8 @@ void update_velocity(
 
     if (iz0 < 1) iz0 = 1;
     if (iz1 > nz - 1) iz1 = nz - 1;
+    if (jx0 < 1) jx0 = 1;
+    if (jx1 > nx - 1) jx1 = nx - 1;
 
     #pragma omp parallel for schedule(static)
     for (int i = iz0; i < iz1; ++i) {
