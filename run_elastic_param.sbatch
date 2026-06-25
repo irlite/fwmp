@@ -23,6 +23,7 @@ module purge
 module load gcc
 module load openmpi
 module load python
+module load scorep
 
 cd ~/fwmp
 source .venv/bin/activate
@@ -37,6 +38,11 @@ export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 
+export SCOREP_ENABLE_TRACING=1
+export SCOREP_PROFILING_MAX_CALLPATH_DEPTH=200
+export SCOREP_EXPERIMENT_DIRECTORY="../scorep_results/${LABEL}"
+export PYTHONUNBUFFERED=1
+
 echo "job_id=$SLURM_JOB_ID"
 echo "label=$LABEL"
 echo "nodes=$NODES"
@@ -44,7 +50,7 @@ echo "tasks_per_node=$TASKS_PER_NODE"
 echo "cpus_per_task=$CPUS_PER_TASK"
 echo "exclusive=$EXCLUSIVE"
 
-srun --distribution=block:block --cpu-bind=cores python -u elastic.py
+srun --distribution=block:block --cpu-bind=cores python -m scorep elastic.py
 
 cd ..
 

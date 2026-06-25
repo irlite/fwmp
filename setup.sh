@@ -12,9 +12,16 @@ gcc -O3 -fopenmp -shared -fPIC src/elastic_kernels_1d.c -o src/libelastic_kernel
 gcc -O3 -fPIC -shared src/elastic_kernels_seq.c -o src/libelastic_kernels_seq.so
 
 #gcc -O3 -shared -fPIC src/elastic_kernels_single_threaded.c -o src/libelastic_kernels_single_threaded.so
-scorep gcc -O3 -shared -fPIC src/elastic_kernels_single_threaded.c -o src/libelastic_kernels_single_threaded.so
+gcc -O3 -shared -fPIC src/elastic_kernels_single_threaded.c -o src/libelastic_kernels_single_threaded.so
+if [ -d ".venv" ]; then
+    source .venv/bin/activate
+else
+    python -m venv .venv
+    source .venv/bin/activate
+fi
 
-source .venv/bin/activate
+# making sure that output ,previous_runs, scorep_results directory exists
+mkdir -p output/ previous_runs/ scorep_results/
 
 python -m pip install --upgrade pip
 
