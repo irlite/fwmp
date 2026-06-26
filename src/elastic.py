@@ -12,7 +12,7 @@ size = comm.Get_size()
 n_iterations = int(os.environ.get("FWMP_NITER", "50000"))
 frame_stride = int(os.environ.get("FWMP_FRAME_STRIDE", "100"))
 direct_vz_source = int(os.environ.get("FWMP_DIRECT_VZ_SOURCE", "0"))
-ds = 8
+ds = 6
 
 slurm_job_id = os.environ.get("SLURM_JOB_ID", "noslurm")
 base_output_dir = os.path.join("/user/utkarsh.pathak/u27935/.project/dir.project/utkarsh/", "output", f"job_{slurm_job_id}")
