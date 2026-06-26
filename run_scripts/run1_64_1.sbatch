@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -p scc-cpu
 #SBATCH -N 1
-#SBATCH --ntasks-per-node64
+#SBATCH --ntasks-per-node =64
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=32G
 #SBATCH --time=00:20:00
