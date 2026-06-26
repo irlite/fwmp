@@ -29,7 +29,7 @@ export OPENBLAS_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 export SCOREP_ENABLE_TRACING=1
 export SCOREP_PROFILING_MAX_CALLPATH_DEPTH=150
-
+export SCOREP_TOTAL_MEMORY=4GB
 export SCOREP_EXPERIMENT_DIRECTORY="../scorep_results/1_12_8"
 export PYTHONUNBUFFERED=1
 #srun --distribution=block:block --cpu-bind=cores python -m scorep -u elastic.py
