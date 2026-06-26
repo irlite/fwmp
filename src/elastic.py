@@ -12,7 +12,8 @@ size = comm.Get_size()
 n_iterations = int(os.environ.get("FWMP_NITER", "50000"))
 frame_stride = int(os.environ.get("FWMP_FRAME_STRIDE", "100"))
 direct_vz_source = int(os.environ.get("FWMP_DIRECT_VZ_SOURCE", "0"))
-ds = 1
+#ds = 1
+ds = int(os.environ.get("FWMP_DS", "1"))
 
 slurm_job_id = os.environ.get("SLURM_JOB_ID", "noslurm")
 base_output_dir = os.path.join("..", "output", f"job_{slurm_job_id}")

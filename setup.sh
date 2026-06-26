@@ -16,4 +16,4 @@ source .venv/bin/activate
 
 python -m pip install --upgrade pip
 
-python -m pip install numpy numba mpi4py h5py segyio matplotlib
+python -m pip install numpy numba mpi4py h5py segyio matplotlib pandas

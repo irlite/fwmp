@@ -2,30 +2,48 @@
 
 set -euo pipefail
 
-GEN=1
+GEN=2
 EXCLUSIVE=false
+WEAK_SCALING=true
 
 CONFIGS=(
-  "1 1 8"
-  "1 4 8"
-  "1 8 8"
-  "1 12 8"
-  "1 4 16"
-  "1 2 32"
-  "1 1 64"
-  "1 16 4"
-  "1 32 2"
-  "1 64 1"
+  "1 2 7"
+  "1 8 7"
 )
 
 mkdir -p "previous_runs/gen${GEN}"
 
 DEPENDENCY=""
 
+BASE_CORES=1
+BASE_DS=23
+
 for CFG in "${CONFIGS[@]}"; do
     read -r NODES TASKS_PER_NODE CPUS_PER_TASK <<< "$CFG"
 
     LABEL="${NODES}x${TASKS_PER_NODE}x${CPUS_PER_TASK}"
+
+    TOTAL_CORES=$((NODES * TASKS_PER_NODE * CPUS_PER_TASK))
+
+    if [ "$WEAK_SCALING" = true ]; then
+        DS=$(python3 - <<EOF
+import math
+
+base_cores = $BASE_CORES
+base_ds = $BASE_DS
+cores = $TOTAL_CORES
+
+ds = round(base_ds * math.sqrt(base_cores / cores))
+print(max(1, ds))
+EOF
+)
+    else
+        DS=1
+    fi
+
+    echo "Submitting ${LABEL}"
+    echo "  total cores = ${TOTAL_CORES}"
+    echo "  FWMP_DS     = ${DS}"
 
     SBATCH_ARGS=(
         -N "$NODES"
@@ -43,7 +61,18 @@ for CFG in "${CONFIGS[@]}"; do
         SBATCH_ARGS+=(--dependency="afterany:${DEPENDENCY}")
     fi
 
-    SUBMIT_OUTPUT=$(sbatch "${SBATCH_ARGS[@]}" run_elastic_param.sbatch "$NODES" "$TASKS_PER_NODE" "$CPUS_PER_TASK" "$GEN" "$EXCLUSIVE")
+    SUBMIT_OUTPUT=$(
+        sbatch \
+            --export=ALL,FWMP_DS=$DS \
+            "${SBATCH_ARGS[@]}" \
+            run_elastic_param.sbatch \
+            "$NODES" \
+            "$TASKS_PER_NODE" \
+            "$CPUS_PER_TASK" \
+            "$GEN" \
+            "$EXCLUSIVE"
+    )
+
     JOB_ID=$(echo "$SUBMIT_OUTPUT" | awk '{print $4}')
 
     echo "submitted ${LABEL}, job_id=${JOB_ID}"
