@@ -19,7 +19,7 @@ module load scorep
 cd ..
 source .venv/bin/activate
 pip install mpi4py
-cd ../src
+cd src/
 # gcc -shared -fPIC -O3 elastic_kernels.c -o libelastic_kernels.so
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export OMP_PROC_BIND=close
