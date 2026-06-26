@@ -17,6 +17,7 @@ module load openmpi
 module load python
 module load scorep
 
+cd ..
 source .venv/bin/activate
 pip install mpi4py
 cd ../src
