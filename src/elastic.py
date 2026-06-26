@@ -15,7 +15,7 @@ direct_vz_source = int(os.environ.get("FWMP_DIRECT_VZ_SOURCE", "0"))
 ds = 1
 
 slurm_job_id = os.environ.get("SLURM_JOB_ID", "noslurm")
-base_output_dir = os.path.join("..", "output", f"job_{slurm_job_id}")
+base_output_dir = os.path.join("/user/utkarsh.pathak/u27935/.project/dir.project/utkarsh/", "output", f"job_{slurm_job_id}")
 rank_output_dir = os.path.join(base_output_dir, f"rank_{rank:04d}")
 
 vp_path = "../data/MODEL_P-WAVE_VELOCITY_1.25m.segy"
