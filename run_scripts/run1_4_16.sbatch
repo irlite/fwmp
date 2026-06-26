@@ -36,3 +36,9 @@ export PYTHONUNBUFFERED=1
 # srun --distribution=block:block --cpu-bind=cores --export=ALL pytho188n -m scorep  --mpp=mpi --thread=omp elastic.py
 srun --distribution=block:block --cpu-bind=cores --export=ALL \
   bash -c 'echo $LD_LIBRARY_PATH; python -m scorep --mpp=mpi --thread=omp elastic.py'
+
+SRC_DIR="/user/utkarsh.pathak/u27935/.project/dir.project/utkarsh/output/job_${SLURM_JOB_ID}"
+
+if [ -d "$SRC_DIR" ]; then
+    rm -rf "$SRC_DIR"
+fi``
