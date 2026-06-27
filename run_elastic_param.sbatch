@@ -39,7 +39,7 @@ export NUMEXPR_NUM_THREADS=1
 
 export SCOREP_ENABLE_TRACING=1
 export SCOREP_PROFILING_MAX_CALLPATH_DEPTH=200
-export SCOREP_EXPERIMENT_DIRECTORY="../scorep_results/${LABEL}"
+export SCOREP_EXPERIMENT_DIRECTORY="/user/utkarsh.pathak/u27935/.project/dir.project/utkarsh/scorep_results/${LABEL}"
 export PYTHONUNBUFFERED=1
 export SCOREP_TOTAL_MEMORY=4GB
 
