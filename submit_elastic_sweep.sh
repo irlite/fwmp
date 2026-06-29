@@ -2,22 +2,13 @@
 
 set -euo pipefail
 
-GEN=2
+GEN=4
 EXCLUSIVE=false
 
 CONFIGS=(
-  "1 1 1"
   "1 1 8"
-  "1 8 8"
-  "1 2 8"
-  "1 32 1"
-  "2 32 1"
-  "4 32 1"
-  "8 32 1"
-  "1 1 32"
-  "2 1 32"
-  "4 1 32"
-  "8 1 32"
+  "1 8 12"
+  "2 2 8"
 )
 
 mkdir -p "previous_runs/gen${GEN}"
@@ -34,7 +25,6 @@ for CFG in "${CONFIGS[@]}"; do
         --ntasks-per-node="$TASKS_PER_NODE"
         --cpus-per-task="$CPUS_PER_TASK"
         --output="previous_runs/gen${GEN}/${LABEL}_%j.out"
-        --error="previous_runs/gen${GEN}/${LABEL}_%j.err"
     )
 
     if [ "$EXCLUSIVE" = true ]; then
