@@ -59,7 +59,7 @@ mkdir -p "$JOB_DIR"
 export FWMP_BASE_OUTPUT_DIR="$JOB_DIR"
 
 srun --distribution=block:block --cpu-bind=cores \
-    python -u elastic_old.py
+    python -u elastic_ssd_old.py
 
 rm -rf "$JOB_DIR"
 echo "cleanup done"

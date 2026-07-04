@@ -43,6 +43,8 @@ export NUMEXPR_NUM_THREADS=1
 
 export FWMP_DS="${FWMP_DS:-1}"
 
+export BLOSC_NTHREADS="$SLURM_CPUS_PER_TASK"
+
 if [ -z "${FWMP_BASE_OUTPUT_DIR:-}" ]; then
     echo "ERROR: FWMP_BASE_OUTPUT_DIR not set"
     exit 1
@@ -59,7 +61,7 @@ mkdir -p "$JOB_DIR"
 export FWMP_BASE_OUTPUT_DIR="$JOB_DIR"
 
 srun --distribution=block:block --cpu-bind=cores \
-    python -u elastic_old.py
+    python -u elastic_ssd_blosc.py
 
 rm -rf "$JOB_DIR"
 echo "cleanup done"

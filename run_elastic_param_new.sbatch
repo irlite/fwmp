@@ -1,10 +1,10 @@
 #!/bin/bash
 #SBATCH -p scc-cpu
-#SBATCH -N 1
-#SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=1
+#SBATCH -N 4
+#SBATCH --ntasks-per-node=2
+#SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
-#SBATCH --time=04:00:00
+#SBATCH --time=10:00:00
 #SBATCH --job-name=elastic
 #SBATCH --output=elastic_%j.out
 #SBATCH --error=elastic_%j.err
@@ -59,7 +59,7 @@ mkdir -p "$JOB_DIR"
 export FWMP_BASE_OUTPUT_DIR="$JOB_DIR"
 
 srun --distribution=block:block --cpu-bind=cores \
-    python -u elastic_old.py
+    python -u elastic.py
 
 rm -rf "$JOB_DIR"
 echo "cleanup done"

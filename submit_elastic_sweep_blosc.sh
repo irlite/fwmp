@@ -1,23 +1,47 @@
 #!/bin/bash
 set -euo pipefail
 
-GEN=51
+GEN=52
 WEAK_SCALING=false
 EXCLUSIVE=false
 
 BASE_CORES=4
 BASE_DS=13
-STRONG_DS=1
-
-CONFIGSS=(
-)
+STRONG_DS=10
 
 CONFIGS=(
-  "1 4 16"
-  "2 2 8"
-  "1 1 64"
+  "4 2 32"
+)
+
+
+CONFIGSSS=(
+  "1 1 1"
+  "1 2 8"
+  "1 4 8"
   "1 8 8"
   "1 12 8"
+
+  "1 2 4"
+  "1 4 2"
+  "1 8 1"
+
+  "1 1 64"
+  "1 2 32"
+  "1 4 8"
+  "1 8 8"
+  "1 16 4"
+  "1 32 2"
+  "1 64 1"
+  "4 2 8"
+  "8 2 8"
+)
+
+CONFIGSS=(
+  "1 4 16"
+  "2 2 8"
+  "1 8 8"
+  "1 12 8"
+  "1 1 64"
   "1 2 32"
   "1 4 8"
   "1 2 8"
@@ -79,7 +103,7 @@ EOF
         $DEP_FLAG \
         --export=ALL,FWMP_DS=$DS,FWMP_BASE_OUTPUT_DIR=$FWMP_BASE_OUTPUT_DIR \
         "${SBATCH_ARGS[@]}" \
-        run_elastic_param.sbatch \
+        run_elastic_param_blosc.sbatch \
         "$NODES" \
         "$TASKS_PER_NODE" \
         "$CPUS_PER_TASK" \

@@ -32,7 +32,7 @@ cd src
 # -----------------------------
 # threading
 # -----------------------------
-export OMP_NUM_THREADS="$SLURM_CPUS_PER_TASK"
+export OMP_NUM_THREADS=$((SLURM_CPUS_PER_TASK - 1))
 export OMP_PROC_BIND=close
 export OMP_PLACES=cores
 export OMP_DYNAMIC=false
@@ -42,6 +42,9 @@ export OPENBLAS_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 
 export FWMP_DS="${FWMP_DS:-1}"
+
+export BLOSC_NTHREADS=1
+export FWMP_IO_BUFFERS=2
 
 if [ -z "${FWMP_BASE_OUTPUT_DIR:-}" ]; then
     echo "ERROR: FWMP_BASE_OUTPUT_DIR not set"
@@ -59,7 +62,7 @@ mkdir -p "$JOB_DIR"
 export FWMP_BASE_OUTPUT_DIR="$JOB_DIR"
 
 srun --distribution=block:block --cpu-bind=cores \
-    python -u elastic_old.py
+    python -u elastic_ssd_pw.py
 
 rm -rf "$JOB_DIR"
 echo "cleanup done"

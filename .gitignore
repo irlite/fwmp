@@ -1,8 +1,14 @@
 frames/
 previous_runs/
 output/
+check_drives.sbatch
+opt_fast_drive/
 src/__pycache__/
 src/libelastic_kernels.so
+src/scorep_trace_run_mpi*
+src/elastic/scorep_trace_run_mpi*
+src/output/
+scorep_results/
 *.out
 *.err
 

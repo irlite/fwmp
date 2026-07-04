@@ -13,9 +13,10 @@ n_iterations = int(os.environ.get("FWMP_NITER", "50000"))
 frame_stride = int(os.environ.get("FWMP_FRAME_STRIDE", "100"))
 direct_vz_source = int(os.environ.get("FWMP_DIRECT_VZ_SOURCE", "0"))
 #ds = 1
-ds = int(os.environ.get("FWMP_DS", "1"))
+ds = int(os.environ.get("FWMP_DS", "8"))
 
-base_output_dir = os.environ["FWMP_BASE_OUTPUT_DIR"]
+slurm_job_id = os.environ.get("SLURM_JOB_ID", "noslurm")
+base_output_dir = os.path.join("..", "output", f"job_{slurm_job_id}")
 rank_output_dir = os.path.join(base_output_dir, f"rank_{rank:04d}")
 
 vp_path = "../data/MODEL_P-WAVE_VELOCITY_1.25m.segy"
@@ -354,7 +355,12 @@ if has_physical_output:
         "vz",
         shape=(n_frames, local_nz_phys, local_nx_phys),
         dtype=np.float32,
+        chunks=(1, chunk_z, chunk_x),
+        compression="gzip",
+        compression_opts=4,
+        shuffle=True
     )
+
     h5.create_dataset("vp", data=vp0[out_z0:out_z1, out_x0:out_x1].astype(np.float32))
 else:
     dset_vz = None
@@ -465,3 +471,4 @@ if rank == 0:
         vf.attrs["n_frames"] = n_frames
 
     print("done", flush=True)
+

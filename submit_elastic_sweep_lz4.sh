@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-GEN=51
+GEN=61
 WEAK_SCALING=false
 EXCLUSIVE=false
 
@@ -13,20 +13,13 @@ CONFIGSS=(
 )
 
 CONFIGS=(
-  "1 4 16"
-  "2 2 8"
-  "1 1 64"
-  "1 8 8"
-  "1 12 8"
-  "1 2 32"
-  "1 4 8"
-  "1 2 8"
-  "1 1 8"
-  "4 2 8"
-  "1 16 4"
   "1 1 1"
-  "1 1 2"
-  "8 2 8"
+  "1 1 16"
+  "1 1 32"
+  "1 3 16"
+  "1 2 32"
+  "1 5 16"
+  "1 3 32"
 )
 
 BASE_OUT="/user/maxim.barnstorf/u27934/fwmp/opt_fast_drive"
@@ -79,7 +72,7 @@ EOF
         $DEP_FLAG \
         --export=ALL,FWMP_DS=$DS,FWMP_BASE_OUTPUT_DIR=$FWMP_BASE_OUTPUT_DIR \
         "${SBATCH_ARGS[@]}" \
-        run_elastic_param.sbatch \
+        run_elastic_param_lz4.sbatch \
         "$NODES" \
         "$TASKS_PER_NODE" \
         "$CPUS_PER_TASK" \

@@ -1,4 +1,5 @@
 import os
+import hdf5plugin
 import ctypes
 import segyio
 import h5py
@@ -345,15 +346,29 @@ comm.Barrier()
 
 h5 = h5py.File(rank_h5_path, "w")
 
+cpus_per_task = int(os.environ.get("SLURM_CPUS_PER_TASK", "1"))
 if has_physical_output:
-    target_elems = max(1, int(4 * 1024 ** 2 / 4))
-    chunk_z = min(local_nz_phys, max(1, int(np.sqrt(target_elems))))
-    chunk_x = min(local_nx_phys, max(1, target_elems // chunk_z))
+    frame_bytes = local_nz_phys * local_nx_phys * 4
+    max_chunk_bytes = cpus_per_task * 8 * 1024**2
+
+    if frame_bytes <= max_chunk_bytes:
+        chunk_z = local_nz_phys
+        chunk_x = local_nx_phys
+    else:
+        scale = (max_chunk_bytes / 4 / (local_nz_phys * local_nx_phys)) ** 0.5
+        chunk_z = max(1, min(local_nz_phys, int(local_nz_phys * scale)))
+        chunk_x = max(1, min(local_nx_phys, int(local_nx_phys * scale)))
 
     dset_vz = h5.create_dataset(
         "vz",
         shape=(n_frames, local_nz_phys, local_nx_phys),
         dtype=np.float32,
+        chunks=(1, chunk_z, chunk_x),
+        **hdf5plugin.Blosc(
+            cname="lz4",
+            clevel=3,
+            shuffle=hdf5plugin.Blosc.SHUFFLE,
+        )
     )
     h5.create_dataset("vp", data=vp0[out_z0:out_z1, out_x0:out_x1].astype(np.float32))
 else:

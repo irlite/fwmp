@@ -1,22 +1,41 @@
 import os
+os.environ["BLOSC_NTHREADS"] = "1"
+import hdf5plugin
 import ctypes
+import shutil
 import segyio
 import h5py
 import numpy as np
+import threading
+import queue
 from mpi4py import MPI
 
 comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
 size = comm.Get_size()
 
+allowed = sorted(os.sched_getaffinity(0))
+if len(allowed) < 2:
+    raise RuntimeError(f"rank {rank}: need at least 2 allowed CPUs, got {allowed}")
+io_core = allowed[-1]
+
 n_iterations = int(os.environ.get("FWMP_NITER", "50000"))
 frame_stride = int(os.environ.get("FWMP_FRAME_STRIDE", "100"))
 direct_vz_source = int(os.environ.get("FWMP_DIRECT_VZ_SOURCE", "0"))
-#ds = 1
 ds = int(os.environ.get("FWMP_DS", "1"))
 
 base_output_dir = os.environ["FWMP_BASE_OUTPUT_DIR"]
-rank_output_dir = os.path.join(base_output_dir, f"rank_{rank:04d}")
+
+fast_root = os.environ.get("FWMP_FAST_OUTPUT_DIR", os.environ.get("TMPDIR", base_output_dir))
+fast_output_dir = os.path.join(fast_root, "fwmp_fast_output")
+
+local_rank_output_dir = os.path.join(fast_output_dir, f"rank_{rank:04d}")
+rank_h5_path = os.path.join(local_rank_output_dir, "elastic_wavefield.h5")
+
+final_rank_output_dir = os.path.join(base_output_dir, f"rank_{rank:04d}")
+final_rank_h5_path = os.path.join(final_rank_output_dir, "elastic_wavefield.h5")
+
+vds_path = os.path.join(base_output_dir, "elastic_wavefield.h5")
 
 vp_path = "../data/MODEL_P-WAVE_VELOCITY_1.25m.segy"
 vs_path = "../data/MODEL_S-WAVE_VELOCITY_1.25m.segy"
@@ -51,13 +70,14 @@ comm.Barrier()
 
 if rank == 0:
     os.makedirs(base_output_dir, exist_ok=True)
+    print(f"base_output_dir={base_output_dir}", flush=True)
+    print(f"fast_output_dir={fast_output_dir}", flush=True)
 
 comm.Barrier()
-os.makedirs(rank_output_dir, exist_ok=True)
-comm.Barrier()
 
-rank_h5_path = os.path.join(rank_output_dir, "elastic_wavefield.h5")
-vds_path = os.path.join(base_output_dir, "elastic_wavefield.h5")
+os.makedirs(local_rank_output_dir, exist_ok=True)
+
+comm.Barrier()
 
 def load_segy(path):
     with segyio.open(path, "r", ignore_geometry=True) as f:
@@ -185,6 +205,64 @@ def update_velocity_c(vx, vz, sxx, szz, sxz, inv_rho, damp, dt, dx, dz, iz0, iz1
         jx0, jx1
     )
 
+class AsyncFrameWriter:
+    def __init__(self, dset, frame_shape, dtype=np.float32, nbuf=2, io_core=None):
+        self.dset = dset
+        self.frame_shape = tuple(frame_shape)
+        self.dtype = dtype
+        self.io_core = io_core
+        self.exc = None
+        self.free = queue.Queue(maxsize=nbuf)
+        self.todo = queue.Queue(maxsize=nbuf)
+        for _ in range(nbuf):
+            self.free.put(np.empty(self.frame_shape, dtype=self.dtype))
+        self.thread = threading.Thread(target=self._worker, daemon=False)
+        self.thread.start()
+
+    def _check(self):
+        if self.exc is not None:
+            raise RuntimeError("async HDF5 writer failed") from self.exc
+
+    def _worker(self):
+        try:
+            if self.io_core is not None:
+                os.sched_setaffinity(0, {self.io_core})
+            while True:
+                item = self.todo.get()
+                if item is None:
+                    return
+                frame_id, buf = item
+                try:
+                    self.dset[frame_id, :, :] = buf
+                finally:
+                    self.free.put(buf)
+        except BaseException as e:
+            self.exc = e
+            try:
+                self.free.put_nowait(np.empty(self.frame_shape, dtype=self.dtype))
+            except Exception:
+                pass
+
+    def acquire_buffer(self):
+        while True:
+            self._check()
+            try:
+                buf = self.free.get(timeout=0.1)
+                self._check()
+                return buf
+            except queue.Empty:
+                pass
+
+    def submit(self, frame_id, buf):
+        self._check()
+        self.todo.put((frame_id, buf))
+        self._check()
+
+    def close(self):
+        self.todo.put(None)
+        self.thread.join()
+        self._check()
+
 vp0 = load_segy(vp_path)[::ds, ::ds].astype(np.float32)
 vs0 = load_segy(vs_path)[::ds, ::ds].astype(np.float32)
 rho0 = load_segy(rho_path)[::ds, ::ds].astype(np.float32)
@@ -272,7 +350,7 @@ for i in range(pad_top):
 
 r = ramp(pad_bottom)
 for i in range(pad_bottom):
-    sigma[-1 - i, :] = np.maximum(sigma[-1 - i, :], 120.0 * r[pad_bottom - 1 - i])
+    sigma[-1 - i, :] = np.maximum(sigma[-1 - i], 120.0 * r[pad_bottom - 1 - i])
 
 damp = np.clip(1.0 - sigma * float(dt), 0.0, 1.0).astype(np.float32)
 
@@ -346,14 +424,27 @@ comm.Barrier()
 h5 = h5py.File(rank_h5_path, "w")
 
 if has_physical_output:
-    target_elems = max(1, int(4 * 1024 ** 2 / 4))
-    chunk_z = min(local_nz_phys, max(1, int(np.sqrt(target_elems))))
-    chunk_x = min(local_nx_phys, max(1, target_elems // chunk_z))
+    frame_bytes = local_nz_phys * local_nx_phys * np.dtype(np.float32).itemsize
+    target_chunk_bytes = min(frame_bytes, 8 * 1024 ** 2)
+
+    if frame_bytes <= target_chunk_bytes:
+        chunk_z = local_nz_phys
+        chunk_x = local_nx_phys
+    else:
+        scale = (target_chunk_bytes / frame_bytes) ** 0.5
+        chunk_z = max(1, min(local_nz_phys, int(local_nz_phys * scale)))
+        chunk_x = max(1, min(local_nx_phys, int(local_nx_phys * scale)))
 
     dset_vz = h5.create_dataset(
         "vz",
         shape=(n_frames, local_nz_phys, local_nx_phys),
         dtype=np.float32,
+        chunks=(1, chunk_z, chunk_x),
+        **hdf5plugin.Blosc(
+            cname="lz4",
+            clevel=3,
+            shuffle=hdf5plugin.Blosc.SHUFFLE,
+        )
     )
     h5.create_dataset("vp", data=vp0[out_z0:out_z1, out_x0:out_x1].astype(np.float32))
 else:
@@ -381,6 +472,20 @@ h5.attrs["dz"] = float(dz)
 h5.attrs["dt"] = float(dt)
 h5.attrs["frame_stride"] = frame_stride
 h5.attrs["n_frames"] = n_frames
+h5.attrs["base_output_dir"] = base_output_dir
+h5.attrs["fast_output_dir"] = fast_output_dir
+
+io_writer = None
+
+if has_physical_output:
+    n_io_buffers = int(os.environ.get("FWMP_IO_BUFFERS", "2"))
+    io_writer = AsyncFrameWriter(
+        dset_vz,
+        frame_shape=(local_nz_phys, local_nx_phys),
+        dtype=np.float32,
+        nbuf=n_io_buffers,
+        io_core=io_core,
+    )
 
 update_stress_c(vx, vz, sxx, szz, sxz, lam_loc, lam2mu_loc, mu_loc, damp_loc, dt, dx, dz, iz0, iz1, jx0, jx1)
 update_velocity_c(vx, vz, sxx, szz, sxz, inv_rho_loc, damp_loc, dt, dx, dz, iz0, iz1, jx0, jx1)
@@ -412,16 +517,33 @@ def step(it):
 
 frame_id = 0
 
-for it in range(n_iterations):
-    step(it)
+try:
+    for it in range(n_iterations):
+        step(it)
 
-    if it % frame_stride == 0:
-        if has_physical_output:
-            local_view = np.ascontiguousarray(vz[local_i0:local_i1, local_j0:local_j1])
-            dset_vz[frame_id] = local_view
-        frame_id += 1
+        if it % frame_stride == 0:
+            if has_physical_output:
+                buf = io_writer.acquire_buffer()
+                np.copyto(buf, vz[local_i0:local_i1, local_j0:local_j1])
+                io_writer.submit(frame_id, buf)
+            frame_id += 1
+finally:
+    if io_writer is not None:
+        io_writer.close()
 
-h5.close()
+    h5.close()
+
+os.makedirs(final_rank_output_dir, exist_ok=True)
+
+tmp_final_rank_h5_path = final_rank_h5_path + f".tmp_rank_{rank:04d}"
+
+if os.path.exists(tmp_final_rank_h5_path):
+    os.remove(tmp_final_rank_h5_path)
+
+shutil.copy2(rank_h5_path, tmp_final_rank_h5_path)
+os.replace(tmp_final_rank_h5_path, final_rank_h5_path)
+
+comm.Barrier()
 
 meta = {
     "rank": rank,
@@ -463,5 +585,8 @@ if rank == 0:
         vf.attrs["dt"] = float(dt)
         vf.attrs["frame_stride"] = frame_stride
         vf.attrs["n_frames"] = n_frames
+        vf.attrs["base_output_dir"] = base_output_dir
+        vf.attrs["fast_output_dir"] = fast_output_dir
 
     print("done", flush=True)
+    print(f"final output: {base_output_dir}", flush=True)

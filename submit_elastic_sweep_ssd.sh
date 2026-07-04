@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-GEN=51
+GEN=11
 WEAK_SCALING=false
 EXCLUSIVE=false
 
@@ -79,7 +79,7 @@ EOF
         $DEP_FLAG \
         --export=ALL,FWMP_DS=$DS,FWMP_BASE_OUTPUT_DIR=$FWMP_BASE_OUTPUT_DIR \
         "${SBATCH_ARGS[@]}" \
-        run_elastic_param.sbatch \
+        run_elastic_param_ssd.sbatch \
         "$NODES" \
         "$TASKS_PER_NODE" \
         "$CPUS_PER_TASK" \

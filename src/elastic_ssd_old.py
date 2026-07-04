@@ -1,5 +1,6 @@
 import os
 import ctypes
+import shutil
 import segyio
 import h5py
 import numpy as np
@@ -12,11 +13,20 @@ size = comm.Get_size()
 n_iterations = int(os.environ.get("FWMP_NITER", "50000"))
 frame_stride = int(os.environ.get("FWMP_FRAME_STRIDE", "100"))
 direct_vz_source = int(os.environ.get("FWMP_DIRECT_VZ_SOURCE", "0"))
-#ds = 1
 ds = int(os.environ.get("FWMP_DS", "1"))
 
 base_output_dir = os.environ["FWMP_BASE_OUTPUT_DIR"]
-rank_output_dir = os.path.join(base_output_dir, f"rank_{rank:04d}")
+
+fast_root = os.environ.get("FWMP_FAST_OUTPUT_DIR", os.environ.get("TMPDIR", base_output_dir))
+fast_output_dir = os.path.join(fast_root, "fwmp_fast_output")
+
+local_rank_output_dir = os.path.join(fast_output_dir, f"rank_{rank:04d}")
+rank_h5_path = os.path.join(local_rank_output_dir, "elastic_wavefield.h5")
+
+final_rank_output_dir = os.path.join(base_output_dir, f"rank_{rank:04d}")
+final_rank_h5_path = os.path.join(final_rank_output_dir, "elastic_wavefield.h5")
+
+vds_path = os.path.join(base_output_dir, "elastic_wavefield.h5")
 
 vp_path = "../data/MODEL_P-WAVE_VELOCITY_1.25m.segy"
 vs_path = "../data/MODEL_S-WAVE_VELOCITY_1.25m.segy"
@@ -51,13 +61,14 @@ comm.Barrier()
 
 if rank == 0:
     os.makedirs(base_output_dir, exist_ok=True)
+    print(f"base_output_dir={base_output_dir}", flush=True)
+    print(f"fast_output_dir={fast_output_dir}", flush=True)
 
 comm.Barrier()
-os.makedirs(rank_output_dir, exist_ok=True)
-comm.Barrier()
 
-rank_h5_path = os.path.join(rank_output_dir, "elastic_wavefield.h5")
-vds_path = os.path.join(base_output_dir, "elastic_wavefield.h5")
+os.makedirs(local_rank_output_dir, exist_ok=True)
+
+comm.Barrier()
 
 def load_segy(path):
     with segyio.open(path, "r", ignore_geometry=True) as f:
@@ -354,7 +365,12 @@ if has_physical_output:
         "vz",
         shape=(n_frames, local_nz_phys, local_nx_phys),
         dtype=np.float32,
+        chunks=(1, chunk_z, chunk_x),
+        compression="gzip",
+        compression_opts=4,
+        shuffle=True
     )
+
     h5.create_dataset("vp", data=vp0[out_z0:out_z1, out_x0:out_x1].astype(np.float32))
 else:
     dset_vz = None
@@ -381,6 +397,8 @@ h5.attrs["dz"] = float(dz)
 h5.attrs["dt"] = float(dt)
 h5.attrs["frame_stride"] = frame_stride
 h5.attrs["n_frames"] = n_frames
+h5.attrs["base_output_dir"] = base_output_dir
+h5.attrs["fast_output_dir"] = fast_output_dir
 
 update_stress_c(vx, vz, sxx, szz, sxz, lam_loc, lam2mu_loc, mu_loc, damp_loc, dt, dx, dz, iz0, iz1, jx0, jx1)
 update_velocity_c(vx, vz, sxx, szz, sxz, inv_rho_loc, damp_loc, dt, dx, dz, iz0, iz1, jx0, jx1)
@@ -423,6 +441,18 @@ for it in range(n_iterations):
 
 h5.close()
 
+os.makedirs(final_rank_output_dir, exist_ok=True)
+
+tmp_final_rank_h5_path = final_rank_h5_path + f".tmp_rank_{rank:04d}"
+
+if os.path.exists(tmp_final_rank_h5_path):
+    os.remove(tmp_final_rank_h5_path)
+
+shutil.copy2(rank_h5_path, tmp_final_rank_h5_path)
+os.replace(tmp_final_rank_h5_path, final_rank_h5_path)
+
+comm.Barrier()
+
 meta = {
     "rank": rank,
     "has": bool(has_physical_output),
@@ -463,5 +493,8 @@ if rank == 0:
         vf.attrs["dt"] = float(dt)
         vf.attrs["frame_stride"] = frame_stride
         vf.attrs["n_frames"] = n_frames
+        vf.attrs["base_output_dir"] = base_output_dir
+        vf.attrs["fast_output_dir"] = fast_output_dir
 
     print("done", flush=True)
+    print(f"final output: {base_output_dir}", flush=True)

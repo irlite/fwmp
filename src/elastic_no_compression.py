@@ -4,6 +4,26 @@ import segyio
 import h5py
 import numpy as np
 from mpi4py import MPI
+from contextlib import contextmanager
+
+scorep_root = os.environ.get("SCOREP_EXPERIMENT_DIRECTORY", "..")
+os.makedirs(scorep_root, exist_ok=True)
+os.environ["SCOREP_EXPERIMENT_DIRECTORY"] = scorep_root
+
+try:
+    import scorep.user as scorep_user
+    scorep_available = True
+except Exception:
+    scorep_user = None
+    scorep_available = False
+
+@contextmanager
+def scorep_region(name):
+    if scorep_available and hasattr(scorep_user, "region"):
+        with scorep_user.region(name):
+            yield
+    else:
+        yield
 
 comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
@@ -12,9 +32,10 @@ size = comm.Get_size()
 n_iterations = int(os.environ.get("FWMP_NITER", "50000"))
 frame_stride = int(os.environ.get("FWMP_FRAME_STRIDE", "100"))
 direct_vz_source = int(os.environ.get("FWMP_DIRECT_VZ_SOURCE", "0"))
-#ds = 1
 ds = int(os.environ.get("FWMP_DS", "1"))
+output_batch = int(os.environ.get("FWMP_OUTPUT_BATCH", "8"))
 
+slurm_job_id = os.environ.get("SLURM_JOB_ID", "noslurm")
 base_output_dir = os.environ["FWMP_BASE_OUTPUT_DIR"]
 rank_output_dir = os.path.join(base_output_dir, f"rank_{rank:04d}")
 
@@ -22,7 +43,9 @@ vp_path = "../data/MODEL_P-WAVE_VELOCITY_1.25m.segy"
 vs_path = "../data/MODEL_S-WAVE_VELOCITY_1.25m.segy"
 rho_path = "../data/MODEL_DENSITY_1.25m.segy"
 
-lib = ctypes.CDLL(os.path.join(os.path.dirname(__file__), "libelastic_kernels.so"))
+with scorep_region("load_kernel_library"):
+    lib = ctypes.CDLL(os.path.join(os.path.dirname(__file__), "libelastic_kernels.so"))
+
 _float2 = np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags="C_CONTIGUOUS")
 
 lib.update_stress.argtypes = [
@@ -50,10 +73,14 @@ lib.update_velocity.restype = None
 comm.Barrier()
 
 if rank == 0:
-    os.makedirs(base_output_dir, exist_ok=True)
+    with scorep_region("create_base_output_dir"):
+        os.makedirs(base_output_dir, exist_ok=True)
 
 comm.Barrier()
-os.makedirs(rank_output_dir, exist_ok=True)
+
+with scorep_region("create_rank_output_dir"):
+    os.makedirs(rank_output_dir, exist_ok=True)
+
 comm.Barrier()
 
 rank_h5_path = os.path.join(rank_output_dir, "elastic_wavefield.h5")
@@ -185,9 +212,10 @@ def update_velocity_c(vx, vz, sxx, szz, sxz, inv_rho, damp, dt, dx, dz, iz0, iz1
         jx0, jx1
     )
 
-vp0 = load_segy(vp_path)[::ds, ::ds].astype(np.float32)
-vs0 = load_segy(vs_path)[::ds, ::ds].astype(np.float32)
-rho0 = load_segy(rho_path)[::ds, ::ds].astype(np.float32)
+with scorep_region("load_segy_inputs"):
+    vp0 = load_segy(vp_path)[::ds, ::ds].astype(np.float32)
+    vs0 = load_segy(vs_path)[::ds, ::ds].astype(np.float32)
+    rho0 = load_segy(rho_path)[::ds, ::ds].astype(np.float32)
 
 nz0, nx0 = vp0.shape
 dx = np.float32(1.25 * ds)
@@ -202,8 +230,9 @@ pad_right = nb
 nz = nz0 + pad_top + pad_bottom
 nx = nx0 + pad_left + pad_right
 
-dims = choose_dims(size, nz, nx)
-cart = comm.Create_cart(dims=dims, periods=[False, False], reorder=False)
+with scorep_region("create_cartesian_topology"):
+    dims = choose_dims(size, nz, nx)
+    cart = comm.Create_cart(dims=dims, periods=[False, False], reorder=False)
 
 coord_z, coord_x = cart.Get_coords(rank)
 
@@ -228,14 +257,15 @@ def pad_field(f0):
     f[pad_top + nz0:, :] = f[pad_top + nz0 - 1:pad_top + nz0, :]
     return f
 
-vp = pad_field(vp0)
-vs = pad_field(vs0)
-rho = pad_field(rho0)
+with scorep_region("build_material_model"):
+    vp = pad_field(vp0)
+    vs = pad_field(vs0)
+    rho = pad_field(rho0)
 
-mu = (rho * vs ** 2).astype(np.float32)
-lam = (rho * vp ** 2 - 2.0 * mu).astype(np.float32)
-lam2mu = (lam + 2.0 * mu).astype(np.float32)
-inv_rho = (1.0 / rho).astype(np.float32)
+    mu = (rho * vs ** 2).astype(np.float32)
+    lam = (rho * vp ** 2 - 2.0 * mu).astype(np.float32)
+    lam2mu = (lam + 2.0 * mu).astype(np.float32)
+    inv_rho = (1.0 / rho).astype(np.float32)
 
 vp_max = float(vp.max())
 dt = np.float32(0.4 * float(dx) / vp_max)
@@ -253,40 +283,43 @@ src_z0 = 1
 src_x = pad_left + src_x0
 src_z = pad_top + src_z0
 
-sigma = np.zeros((nz, nx), dtype=np.float32)
-
 def ramp(n, power=2.0):
     return np.linspace(0.0, 1.0, n, dtype=np.float32) ** power
 
-r = ramp(pad_left)
-for i in range(pad_left):
-    sigma[:, i] = np.maximum(sigma[:, i], 60.0 * r[pad_left - 1 - i])
+with scorep_region("build_damping"):
+    sigma = np.zeros((nz, nx), dtype=np.float32)
 
-r = ramp(pad_right)
-for i in range(pad_right):
-    sigma[:, -1 - i] = np.maximum(sigma[:, -1 - i], 60.0 * r[pad_right - 1 - i])
+    r = ramp(pad_left)
+    for i in range(pad_left):
+        sigma[:, i] = np.maximum(sigma[:, i], 60.0 * r[pad_left - 1 - i])
 
-r = ramp(pad_top)
-for i in range(pad_top):
-    sigma[i, :] = np.maximum(sigma[i, :], 60.0 * r[pad_top - 1 - i])
+    r = ramp(pad_right)
+    for i in range(pad_right):
+        sigma[:, -1 - i] = np.maximum(sigma[:, -1 - i], 60.0 * r[pad_right - 1 - i])
 
-r = ramp(pad_bottom)
-for i in range(pad_bottom):
-    sigma[-1 - i, :] = np.maximum(sigma[-1 - i, :], 120.0 * r[pad_bottom - 1 - i])
+    r = ramp(pad_top)
+    for i in range(pad_top):
+        sigma[i, :] = np.maximum(sigma[i, :], 60.0 * r[pad_top - 1 - i])
 
-damp = np.clip(1.0 - sigma * float(dt), 0.0, 1.0).astype(np.float32)
+    r = ramp(pad_bottom)
+    for i in range(pad_bottom):
+        sigma[-1 - i, :] = np.maximum(sigma[-1 - i, :], 120.0 * r[pad_bottom - 1 - i])
 
-mu_loc = np.ascontiguousarray(add_halo_2d(mu[z_start:z_end, x_start:x_end]))
-lam_loc = np.ascontiguousarray(add_halo_2d(lam[z_start:z_end, x_start:x_end]))
-lam2mu_loc = np.ascontiguousarray(add_halo_2d(lam2mu[z_start:z_end, x_start:x_end]))
-inv_rho_loc = np.ascontiguousarray(add_halo_2d(inv_rho[z_start:z_end, x_start:x_end]))
-damp_loc = np.ascontiguousarray(add_halo_2d(damp[z_start:z_end, x_start:x_end]))
+    damp = np.clip(1.0 - sigma * float(dt), 0.0, 1.0).astype(np.float32)
 
-vx = np.zeros((nz_loc + 2, nx_loc + 2), dtype=np.float32)
-vz = np.zeros((nz_loc + 2, nx_loc + 2), dtype=np.float32)
-sxx = np.zeros((nz_loc + 2, nx_loc + 2), dtype=np.float32)
-szz = np.zeros((nz_loc + 2, nx_loc + 2), dtype=np.float32)
-sxz = np.zeros((nz_loc + 2, nx_loc + 2), dtype=np.float32)
+with scorep_region("extract_local_material"):
+    mu_loc = np.ascontiguousarray(add_halo_2d(mu[z_start:z_end, x_start:x_end]))
+    lam_loc = np.ascontiguousarray(add_halo_2d(lam[z_start:z_end, x_start:x_end]))
+    lam2mu_loc = np.ascontiguousarray(add_halo_2d(lam2mu[z_start:z_end, x_start:x_end]))
+    inv_rho_loc = np.ascontiguousarray(add_halo_2d(inv_rho[z_start:z_end, x_start:x_end]))
+    damp_loc = np.ascontiguousarray(add_halo_2d(damp[z_start:z_end, x_start:x_end]))
+
+with scorep_region("allocate_wavefields"):
+    vx = np.zeros((nz_loc + 2, nx_loc + 2), dtype=np.float32)
+    vz = np.zeros((nz_loc + 2, nx_loc + 2), dtype=np.float32)
+    sxx = np.zeros((nz_loc + 2, nx_loc + 2), dtype=np.float32)
+    szz = np.zeros((nz_loc + 2, nx_loc + 2), dtype=np.float32)
+    sxz = np.zeros((nz_loc + 2, nx_loc + 2), dtype=np.float32)
 
 halo_bufs = make_halo_buffers(nz_loc, nx_loc)
 
@@ -340,50 +373,67 @@ else:
     local_nx_phys = 0
 
 n_frames = len(range(0, n_iterations, frame_stride))
+output_batch = max(1, min(output_batch, max(1, n_frames)))
 
 comm.Barrier()
 
-h5 = h5py.File(rank_h5_path, "w")
-
-if has_physical_output:
-    target_elems = max(1, int(4 * 1024 ** 2 / 4))
-    chunk_z = min(local_nz_phys, max(1, int(np.sqrt(target_elems))))
-    chunk_x = min(local_nx_phys, max(1, target_elems // chunk_z))
-
-    dset_vz = h5.create_dataset(
-        "vz",
-        shape=(n_frames, local_nz_phys, local_nx_phys),
-        dtype=np.float32,
+with scorep_region("hdf5_open_rank_file"):
+    h5 = h5py.File(
+        rank_h5_path,
+        "w",
+        libver="latest",
+        alignment_threshold=4 * 1024 ** 2,
+        alignment_interval=4 * 1024 ** 2,
+        meta_block_size=4 * 1024 ** 2
     )
-    h5.create_dataset("vp", data=vp0[out_z0:out_z1, out_x0:out_x1].astype(np.float32))
-else:
-    dset_vz = None
 
-times = np.arange(n_frames, dtype=np.float32) * frame_stride * dt
-h5.create_dataset("time", data=times)
+with scorep_region("hdf5_create_rank_datasets"):
+    if has_physical_output:
+        dset_vz = h5.create_dataset(
+            "vz",
+            shape=(n_frames, local_nz_phys, local_nx_phys),
+            dtype=np.float32,
+            track_times=False
+        )
 
-h5.attrs["rank"] = rank
-h5.attrs["size"] = size
-h5.attrs["dims_z"] = dims[0]
-h5.attrs["dims_x"] = dims[1]
-h5.attrs["coord_z"] = coord_z
-h5.attrs["coord_x"] = coord_x
-h5.attrs["z0"] = out_z0
-h5.attrs["z1"] = out_z1
-h5.attrs["x0"] = out_x0
-h5.attrs["x1"] = out_x1
-h5.attrs["local_nz_phys"] = local_nz_phys
-h5.attrs["local_nx_phys"] = local_nx_phys
-h5.attrs["nz0"] = nz0
-h5.attrs["nx0"] = nx0
-h5.attrs["dx"] = float(dx)
-h5.attrs["dz"] = float(dz)
-h5.attrs["dt"] = float(dt)
-h5.attrs["frame_stride"] = frame_stride
-h5.attrs["n_frames"] = n_frames
+        h5.create_dataset(
+            "vp",
+            data=vp0[out_z0:out_z1, out_x0:out_x1].astype(np.float32),
+            track_times=False
+        )
 
-update_stress_c(vx, vz, sxx, szz, sxz, lam_loc, lam2mu_loc, mu_loc, damp_loc, dt, dx, dz, iz0, iz1, jx0, jx1)
-update_velocity_c(vx, vz, sxx, szz, sxz, inv_rho_loc, damp_loc, dt, dx, dz, iz0, iz1, jx0, jx1)
+        batch_buf = np.empty((output_batch, local_nz_phys, local_nx_phys), dtype=np.float32)
+    else:
+        dset_vz = None
+        batch_buf = None
+
+    times = np.arange(n_frames, dtype=np.float32) * frame_stride * dt
+    h5.create_dataset("time", data=times, track_times=False)
+
+with scorep_region("hdf5_write_rank_attrs"):
+    h5.attrs["rank"] = rank
+    h5.attrs["size"] = size
+    h5.attrs["dims_z"] = dims[0]
+    h5.attrs["dims_x"] = dims[1]
+    h5.attrs["coord_z"] = coord_z
+    h5.attrs["coord_x"] = coord_x
+    h5.attrs["z0"] = out_z0
+    h5.attrs["z1"] = out_z1
+    h5.attrs["x0"] = out_x0
+    h5.attrs["x1"] = out_x1
+    h5.attrs["local_nz_phys"] = local_nz_phys
+    h5.attrs["local_nx_phys"] = local_nx_phys
+    h5.attrs["nz0"] = nz0
+    h5.attrs["nx0"] = nx0
+    h5.attrs["dx"] = float(dx)
+    h5.attrs["dz"] = float(dz)
+    h5.attrs["dt"] = float(dt)
+    h5.attrs["frame_stride"] = frame_stride
+    h5.attrs["n_frames"] = n_frames
+
+with scorep_region("warmup_kernels"):
+    update_stress_c(vx, vz, sxx, szz, sxz, lam_loc, lam2mu_loc, mu_loc, damp_loc, dt, dx, dz, iz0, iz1, jx0, jx1)
+    update_velocity_c(vx, vz, sxx, szz, sxz, inv_rho_loc, damp_loc, dt, dx, dz, iz0, iz1, jx0, jx1)
 
 vx.fill(0.0)
 vz.fill(0.0)
@@ -410,18 +460,39 @@ def step(it):
 
     update_velocity_c(vx, vz, sxx, szz, sxz, inv_rho_loc, damp_loc, dt, dx, dz, iz0, iz1, jx0, jx1)
 
+def flush_batch(batch_base, batch_count):
+    if has_physical_output and batch_count > 0:
+        with scorep_region("hdf5_write_vz_batch"):
+            dset_vz[batch_base:batch_base + batch_count, :, :] = batch_buf[:batch_count, :, :]
+
 frame_id = 0
+batch_count = 0
+batch_base = 0
 
-for it in range(n_iterations):
-    step(it)
+with scorep_region("time_loop"):
+    for it in range(n_iterations):
+        step(it)
 
-    if it % frame_stride == 0:
-        if has_physical_output:
-            local_view = np.ascontiguousarray(vz[local_i0:local_i1, local_j0:local_j1])
-            dset_vz[frame_id] = local_view
-        frame_id += 1
+        if it % frame_stride == 0:
+            if has_physical_output:
+                if batch_count == 0:
+                    batch_base = frame_id
 
-h5.close()
+                with scorep_region("copy_output_frame_to_batch"):
+                    batch_buf[batch_count, :, :] = vz[local_i0:local_i1, local_j0:local_j1]
+
+                batch_count += 1
+
+                if batch_count == output_batch:
+                    flush_batch(batch_base, batch_count)
+                    batch_count = 0
+
+                frame_id += 1
+
+flush_batch(batch_base, batch_count)
+
+with scorep_region("hdf5_close_rank_file"):
+    h5.close()
 
 meta = {
     "rank": rank,
@@ -433,35 +504,44 @@ meta = {
     "path": os.path.join(f"rank_{rank:04d}", "elastic_wavefield.h5")
 }
 
-all_meta = comm.gather(meta, root=0)
+with scorep_region("gather_vds_metadata"):
+    all_meta = comm.gather(meta, root=0)
 
 comm.Barrier()
 
 if rank == 0:
-    with h5py.File(vds_path, "w", libver="latest") as vf:
-        layout = h5py.VirtualLayout(shape=(n_frames, nz0, nx0), dtype=np.float32)
+    with scorep_region("create_vds_file"):
+        with h5py.File(
+            vds_path,
+            "w",
+            libver="latest",
+            alignment_threshold=4 * 1024 ** 2,
+            alignment_interval=4 * 1024 ** 2,
+            meta_block_size=4 * 1024 ** 2
+        ) as vf:
+            layout = h5py.VirtualLayout(shape=(n_frames, nz0, nx0), dtype=np.float32)
 
-        for m in all_meta:
-            if not m["has"]:
-                continue
+            for m in all_meta:
+                if not m["has"]:
+                    continue
 
-            src_shape = (n_frames, m["z1"] - m["z0"], m["x1"] - m["x0"])
-            source = h5py.VirtualSource(m["path"], "vz", shape=src_shape)
-            layout[:, m["z0"]:m["z1"], m["x0"]:m["x1"]] = source
+                src_shape = (n_frames, m["z1"] - m["z0"], m["x1"] - m["x0"])
+                source = h5py.VirtualSource(m["path"], "vz", shape=src_shape)
+                layout[:, m["z0"]:m["z1"], m["x0"]:m["x1"]] = source
 
-        vf.create_virtual_dataset("vz", layout, fillvalue=0.0)
-        vf.create_dataset("vp", data=vp0.astype(np.float32))
-        vf.create_dataset("time", data=times)
+            vf.create_virtual_dataset("vz", layout, fillvalue=0.0)
+            vf.create_dataset("vp", data=vp0.astype(np.float32), track_times=False)
+            vf.create_dataset("time", data=times, track_times=False)
 
-        vf.attrs["size"] = size
-        vf.attrs["dims_z"] = dims[0]
-        vf.attrs["dims_x"] = dims[1]
-        vf.attrs["nz0"] = nz0
-        vf.attrs["nx0"] = nx0
-        vf.attrs["dx"] = float(dx)
-        vf.attrs["dz"] = float(dz)
-        vf.attrs["dt"] = float(dt)
-        vf.attrs["frame_stride"] = frame_stride
-        vf.attrs["n_frames"] = n_frames
+            vf.attrs["size"] = size
+            vf.attrs["dims_z"] = dims[0]
+            vf.attrs["dims_x"] = dims[1]
+            vf.attrs["nz0"] = nz0
+            vf.attrs["nx0"] = nx0
+            vf.attrs["dx"] = float(dx)
+            vf.attrs["dz"] = float(dz)
+            vf.attrs["dt"] = float(dt)
+            vf.attrs["frame_stride"] = frame_stride
+            vf.attrs["n_frames"] = n_frames
 
     print("done", flush=True)
