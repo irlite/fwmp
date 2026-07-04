@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-GEN=52
+GEN=5
 WEAK_SCALING=false
 EXCLUSIVE=false
 
@@ -10,7 +10,7 @@ BASE_DS=13
 STRONG_DS=10
 
 CONFIGS=(
-  "4 2 32"
+  "1 1 32"
 )
 
 
@@ -53,7 +53,8 @@ CONFIGSS=(
   "8 2 8"
 )
 
-BASE_OUT="/user/maxim.barnstorf/u27934/fwmp/opt_fast_drive"
+BASE_OUT="/user/utkarsh.pathak/u27935/fwmp/opt_fast_drive"
+mkdir -p "${BASE_OUT}"
 mkdir -p "${BASE_OUT}/gen${GEN}/logs"
 
 PREV_JOB=""
@@ -101,7 +102,7 @@ EOF
 
     JOB_ID=$(sbatch --parsable \
         $DEP_FLAG \
-        --export=ALL,FWMP_DS=$DS,FWMP_BASE_OUTPUT_DIR=$FWMP_BASE_OUTPUT_DIR \
+        --export=ALL,FWMP_DS=$DS,FWMP_BASE_OUTPUT_DIR=$FWMP_BASE_OUTPUT_DIR,FWMP_SCOREP=1 \
         "${SBATCH_ARGS[@]}" \
         run_elastic_param_blosc.sbatch \
         "$NODES" \
