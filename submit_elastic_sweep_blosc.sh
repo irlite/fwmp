@@ -1,16 +1,16 @@
 #!/bin/bash
 set -euo pipefail
 
-GEN=52
+GEN=53
 WEAK_SCALING=false
 EXCLUSIVE=false
 
 BASE_CORES=4
 BASE_DS=13
-STRONG_DS=10
+STRONG_DS=2
 
 CONFIGS=(
-  "4 2 32"
+  "8 2 32"
 )
 
 

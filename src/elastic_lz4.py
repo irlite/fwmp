@@ -1,4 +1,5 @@
 import os
+import hdf5plugin
 import ctypes
 import segyio
 import h5py
@@ -355,11 +356,9 @@ if has_physical_output:
         shape=(n_frames, local_nz_phys, local_nx_phys),
         dtype=np.float32,
         chunks=(1, chunk_z, chunk_x),
-        compression="lz4",
-        compression_opts=3,
+        **hdf5plugin.LZ4(),
         shuffle=True
     )
-
     h5.create_dataset("vp", data=vp0[out_z0:out_z1, out_x0:out_x1].astype(np.float32))
 else:
     dset_vz = None
