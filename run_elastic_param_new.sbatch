@@ -4,10 +4,11 @@
 #SBATCH --ntasks-per-node=2
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
-#SBATCH --time=10:00:00
+#SBATCH --time=05:00:00
 #SBATCH --job-name=elastic
 #SBATCH --output=elastic_%j.out
 #SBATCH --error=elastic_%j.err
+#SBATCH --exclude=c0004
 
 set -euo pipefail
 
@@ -59,7 +60,7 @@ mkdir -p "$JOB_DIR"
 export FWMP_BASE_OUTPUT_DIR="$JOB_DIR"
 
 srun --distribution=block:block --cpu-bind=cores \
-    python -u elastic.py
+    python -u elastic_no_compression.py
 
-rm -rf "$JOB_DIR"
+#rm -rf "$JOB_DIR"
 echo "cleanup done"

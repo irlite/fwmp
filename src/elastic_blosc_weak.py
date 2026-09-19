@@ -1,4 +1,3 @@
-
 import os
 import hdf5plugin
 import ctypes
@@ -187,15 +186,20 @@ def update_velocity_c(vx, vz, sxx, szz, sxz, inv_rho, damp, dt, dx, dz, iz0, iz1
         jx0, jx1
     )
 
+comm.Barrier()
+t_io_start = MPI.Wtime()
+
 vp0 = load_segy(vp_path)[::ds, ::ds].astype(np.float32)
 vs0 = load_segy(vs_path)[::ds, ::ds].astype(np.float32)
 rho0 = load_segy(rho_path)[::ds, ::ds].astype(np.float32)
+
+t_io_end = MPI.Wtime()
 
 nz0, nx0 = vp0.shape
 dx = np.float32(1.25 * ds)
 dz = np.float32(1.25 * ds)
 
-nb = 240
+nb = max(1, round(240 / ds))
 pad_top = nb
 pad_bottom = nb
 pad_left = nb
@@ -364,13 +368,14 @@ if has_physical_output:
         "vz",
         shape=(n_frames, local_nz_phys, local_nx_phys),
         dtype=np.float32,
+        chunks=(1, chunk_z, chunk_x),
+        **hdf5plugin.Blosc(
+            cname="lz4",
+            clevel=3,
+            shuffle=hdf5plugin.Blosc.SHUFFLE,
+        )
     )
-
-    h5.create_dataset(
-        "vp",
-        data=vp0[out_z0:out_z1, out_x0:out_x1].astype(np.float32)
-    )
-
+    h5.create_dataset("vp", data=vp0[out_z0:out_z1, out_x0:out_x1].astype(np.float32))
 else:
     dset_vz = None
 
@@ -427,6 +432,9 @@ def step(it):
 
 frame_id = 0
 
+comm.Barrier()
+t_loop_start = MPI.Wtime()
+
 for it in range(n_iterations):
     step(it)
 
@@ -435,6 +443,9 @@ for it in range(n_iterations):
             local_view = np.ascontiguousarray(vz[local_i0:local_i1, local_j0:local_j1])
             dset_vz[frame_id] = local_view
         frame_id += 1
+
+comm.Barrier()
+t_loop_end = MPI.Wtime()
 
 h5.close()
 
@@ -449,6 +460,12 @@ meta = {
 }
 
 all_meta = comm.gather(meta, root=0)
+
+io_time_local = t_io_end - t_io_start
+loop_time_local = t_loop_end - t_loop_start
+
+io_time_max = comm.reduce(io_time_local, op=MPI.MAX, root=0)
+loop_time_max = comm.reduce(loop_time_local, op=MPI.MAX, root=0)
 
 comm.Barrier()
 
@@ -479,4 +496,9 @@ if rank == 0:
         vf.attrs["frame_stride"] = frame_stride
         vf.attrs["n_frames"] = n_frames
 
+    print("MEASURED_IO_TIME_SEC=%.6f" % io_time_max, flush=True)
+    print("MEASURED_LOOP_TIME_SEC=%.6f" % loop_time_max, flush=True)
+    print("MEASURED_SIZE=%d" % size, flush=True)
+    print("MEASURED_DS=%d" % ds, flush=True)
+    print("MEASURED_NITER=%d" % n_iterations, flush=True)
     print("done", flush=True)

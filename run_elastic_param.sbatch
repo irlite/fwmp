@@ -4,62 +4,37 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=32G
-#SBATCH --time=04:00:00
-#SBATCH --job-name=elastic
-#SBATCH --output=elastic_%j.out
-#SBATCH --error=elastic_%j.err
-
+#SBATCH --time=07:00:00
+#SBATCH --job-name=elastic_seq
+#SBATCH --output=elastic_seq_%j.out
+#SBATCH --error=elastic_seq_%j.err
 set -euo pipefail
 
-NODES="${1:-4}"
-TASKS_PER_NODE="${2:-2}"
-CPUS_PER_TASK="${3:-8}"
-GEN="${4:-0}"
-EXCLUSIVE="${5:-false}"
-
-LABEL="${NODES}x${TASKS_PER_NODE}x${CPUS_PER_TASK}_${SLURM_JOB_ID}"
+LABEL="seq_${SLURM_JOB_ID}"
+FWMP_BASE_OUTPUT_DIR="/user/maxim.barnstorf/u27934/opt_fast_drive/gen91"
 JOB_DIR="${FWMP_BASE_OUTPUT_DIR}/job_${SLURM_JOB_ID}"
 
 module purge
 module load gcc
-module load openmpi
 module load python
-
 cd ~/fwmp
 source .venv/bin/activate
 cd src
 
-# -----------------------------
-# threading
-# -----------------------------
-export OMP_NUM_THREADS="$SLURM_CPUS_PER_TASK"
-export OMP_PROC_BIND=close
-export OMP_PLACES=cores
-export OMP_DYNAMIC=false
-
-export MKL_NUM_THREADS=1
-export OPENBLAS_NUM_THREADS=1
-export NUMEXPR_NUM_THREADS=1
-
 export FWMP_DS="${FWMP_DS:-1}"
-
-if [ -z "${FWMP_BASE_OUTPUT_DIR:-}" ]; then
-    echo "ERROR: FWMP_BASE_OUTPUT_DIR not set"
-    exit 1
-fi
+export BLOSC_NTHREADS=1
 
 echo "----------------------------------------"
 echo "job_id=$SLURM_JOB_ID"
 echo "label=$LABEL"
-echo "output=$FWMP_BASE_OUTPUT_DIR"
+echo "output=$JOB_DIR"
 echo "FWMP_DS=$FWMP_DS"
 echo "----------------------------------------"
 
 mkdir -p "$JOB_DIR"
 export FWMP_BASE_OUTPUT_DIR="$JOB_DIR"
 
-srun --distribution=block:block --cpu-bind=cores \
-    python -u elastic_old.py
+/usr/bin/time -v python -u elastic_lz4_seq.py
 
 rm -rf "$JOB_DIR"
 echo "cleanup done"

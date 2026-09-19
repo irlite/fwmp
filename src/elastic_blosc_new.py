@@ -1,4 +1,3 @@
-
 import os
 import hdf5plugin
 import ctypes
@@ -14,8 +13,12 @@ size = comm.Get_size()
 n_iterations = int(os.environ.get("FWMP_NITER", "50000"))
 frame_stride = int(os.environ.get("FWMP_FRAME_STRIDE", "100"))
 direct_vz_source = int(os.environ.get("FWMP_DIRECT_VZ_SOURCE", "0"))
-#ds = 1
-ds = int(os.environ.get("FWMP_DS", "1"))
+
+scale_mode = os.environ.get("FWMP_SCALE_MODE", "none")
+base_ds = float(os.environ.get("FWMP_BASE_DS", "39"))
+base_cores = float(os.environ.get("FWMP_BASE_CORES", "1"))
+total_cores = int(os.environ.get("FWMP_TOTAL_CORES", str(size)))
+ds_legacy = int(os.environ.get("FWMP_DS", "1"))
 
 base_output_dir = os.environ["FWMP_BASE_OUTPUT_DIR"]
 rank_output_dir = os.path.join(base_output_dir, f"rank_{rank:04d}")
@@ -64,6 +67,12 @@ vds_path = os.path.join(base_output_dir, "elastic_wavefield.h5")
 def load_segy(path):
     with segyio.open(path, "r", ignore_geometry=True) as f:
         return np.stack([np.array(tr) for tr in f.trace]).T
+
+def resample_field(a, nz_target, nx_target):
+    nz0, nx0 = a.shape
+    iz = np.linspace(0, nz0 - 1, nz_target).astype(np.int64)
+    ix = np.linspace(0, nx0 - 1, nx_target).astype(np.int64)
+    return a[np.ix_(iz, ix)]
 
 def split_1d(total, parts, coord):
     counts = [total // parts + (1 if r < total % parts else 0) for r in range(parts)]
@@ -187,15 +196,36 @@ def update_velocity_c(vx, vz, sxx, szz, sxz, inv_rho, damp, dt, dx, dz, iz0, iz1
         jx0, jx1
     )
 
-vp0 = load_segy(vp_path)[::ds, ::ds].astype(np.float32)
-vs0 = load_segy(vs_path)[::ds, ::ds].astype(np.float32)
-rho0 = load_segy(rho_path)[::ds, ::ds].astype(np.float32)
+vp_full = load_segy(vp_path).astype(np.float32)
+vs_full = load_segy(vs_path).astype(np.float32)
+rho_full = load_segy(rho_path).astype(np.float32)
 
-nz0, nx0 = vp0.shape
-dx = np.float32(1.25 * ds)
-dz = np.float32(1.25 * ds)
+nz_full, nx_full = vp_full.shape
 
-nb = 240
+if scale_mode == "weak":
+    ds_exact = base_ds * ((base_cores / total_cores) ** 0.5)
+    nz0 = max(1, round(nz_full / ds_exact))
+    nx0 = max(1, round(nx_full / ds_exact))
+    dz = np.float32(1.25 * nz_full / nz0)
+    dx = np.float32(1.25 * nx_full / nx0)
+elif scale_mode == "strong":
+    nz0 = nz_full
+    nx0 = nx_full
+    dz = np.float32(1.25)
+    dx = np.float32(1.25)
+else:
+    ds_exact = float(ds_legacy)
+    nz0 = max(1, round(nz_full / ds_exact))
+    nx0 = max(1, round(nx_full / ds_exact))
+    dz = np.float32(1.25 * nz_full / nz0)
+    dx = np.float32(1.25 * nx_full / nx0)
+
+vp0 = resample_field(vp_full, nz0, nx0)
+vs0 = resample_field(vs_full, nz0, nx0)
+rho0 = resample_field(rho_full, nz0, nx0)
+
+nb_native = 240
+nb = max(8, round(nb_native / ds_exact))
 pad_top = nb
 pad_bottom = nb
 pad_left = nb
@@ -240,7 +270,7 @@ lam2mu = (lam + 2.0 * mu).astype(np.float32)
 inv_rho = (1.0 / rho).astype(np.float32)
 
 vp_max = float(vp.max())
-dt = np.float32(0.4 * float(dx) / vp_max)
+dt = np.float32(0.4 * float(min(dx, dz)) / vp_max)
 
 f0 = np.float32(8.0)
 src_t0 = np.float32(1.2 / f0)
@@ -364,13 +394,14 @@ if has_physical_output:
         "vz",
         shape=(n_frames, local_nz_phys, local_nx_phys),
         dtype=np.float32,
+        chunks=(1, chunk_z, chunk_x),
+        **hdf5plugin.Blosc(
+            cname="lz4",
+            clevel=3,
+            shuffle=hdf5plugin.Blosc.SHUFFLE,
+        )
     )
-
-    h5.create_dataset(
-        "vp",
-        data=vp0[out_z0:out_z1, out_x0:out_x1].astype(np.float32)
-    )
-
+    h5.create_dataset("vp", data=vp0[out_z0:out_z1, out_x0:out_x1].astype(np.float32))
 else:
     dset_vz = None
 
@@ -396,6 +427,8 @@ h5.attrs["dz"] = float(dz)
 h5.attrs["dt"] = float(dt)
 h5.attrs["frame_stride"] = frame_stride
 h5.attrs["n_frames"] = n_frames
+h5.attrs["scale_mode"] = scale_mode
+h5.attrs["total_cores"] = total_cores
 
 update_stress_c(vx, vz, sxx, szz, sxz, lam_loc, lam2mu_loc, mu_loc, damp_loc, dt, dx, dz, iz0, iz1, jx0, jx1)
 update_velocity_c(vx, vz, sxx, szz, sxz, inv_rho_loc, damp_loc, dt, dx, dz, iz0, iz1, jx0, jx1)

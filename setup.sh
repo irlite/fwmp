@@ -9,12 +9,15 @@ module load scorep
 
 #gcc -O3 -fopenmp -shared -fPIC src/elastic_kernels.c -o src/libelastic_kernels.so
 #gcc -O3 -fopenmp -shared -fPIC src/elastic_kernels_1d.c -o src/libelastic_kernels_1d.so
-#gcc -O3 -fPIC -shared src/elastic_kernels_seq.c -o src/libelastic_kernels_seq.so
+gcc -O3 -fPIC -shared src/elastic_kernels_seq.c -o src/libelastic_kernels_seq.so
 
 #gcc -O3 -shared -fPIC src/elastic_kernels_single_threaded.c -o src/libelastic_kernels_single_threaded.so
 
-scorep-gcc -O3 -fopenmp -march=native -fPIC --openmp \
-    -shared -o src/libelastic_kernels.so src/elastic_kernels.c
+#scorep-gcc -O3 -fopenmp -march=native -fPIC --openmp \
+#    -shared -o src/libelastic_kernels.so src/elastic_kernels.c
+gcc -O3 -fopenmp -fPIC -shared \
+    src/elastic_kernels.c \
+    -o src/libelastic_kernels.so
 
 source .venv/bin/activate
 

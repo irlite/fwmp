@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-GEN=61
+GEN=62
 WEAK_SCALING=false
 EXCLUSIVE=false
 
@@ -10,15 +10,15 @@ BASE_DS=13
 STRONG_DS=1
 
 CONFIGSS=(
-)
-
-CONFIGS=(
   "1 1 16"
-  "1 1 32"
   "1 3 16"
   "1 2 32"
   "1 5 16"
   "1 3 32"
+)
+
+CONFIGS=(
+  "1 1 32"
 )
 
 BASE_OUT="/user/maxim.barnstorf/u27934/fwmp/opt_fast_drive"

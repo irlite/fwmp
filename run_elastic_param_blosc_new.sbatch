@@ -41,7 +41,6 @@ export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 
-export FWMP_DS="${FWMP_DS:-1}"
 export BLOSC_NTHREADS="$SLURM_CPUS_PER_TASK"
 
 if [ -z "${FWMP_BASE_OUTPUT_DIR:-}" ]; then
@@ -49,11 +48,17 @@ if [ -z "${FWMP_BASE_OUTPUT_DIR:-}" ]; then
     exit 1
 fi
 
+export FWMP_SCALE_MODE="${FWMP_SCALE_MODE:-none}"
+export FWMP_BASE_CORES="${FWMP_BASE_CORES:-1}"
+export FWMP_BASE_DS="${FWMP_BASE_DS:-39}"
+export FWMP_TOTAL_CORES="${FWMP_TOTAL_CORES:-$((NODES * TASKS_PER_NODE * CPUS_PER_TASK))}"
+export FWMP_DS="${FWMP_DS:-1}"
+
 export FWMP_SCOREP="${FWMP_SCOREP:-0}"
 
 SCOREP_DIR="${FWMP_BASE_OUTPUT_DIR}/scorep_${LABEL}"
 
-RUN_CMD=(python -u elastic_blosc_weak.py)
+RUN_CMD=(python -u elastic_blosc_new.py)
 
 if [ "$FWMP_SCOREP" = "1" ]; then
     mkdir -p "$SCOREP_DIR"
@@ -69,14 +74,17 @@ if [ "$FWMP_SCOREP" = "1" ]; then
     export SCOREP_MPI_ENABLE_GROUPS=ALL
     export SCOREP_OPENMP_ENABLE=true
 
-    RUN_CMD=(python -m scorep --mpp=mpi --thread=omp elastic_blosc_weak.py)
+    RUN_CMD=(python -m scorep --mpp=mpi --thread=omp elastic_blosc_new.py)
 fi
 
 echo "----------------------------------------"
 echo "job_id=$SLURM_JOB_ID"
 echo "label=$LABEL"
 echo "output=$FWMP_BASE_OUTPUT_DIR"
-echo "FWMP_DS=$FWMP_DS"
+echo "scale_mode=$FWMP_SCALE_MODE"
+echo "base_cores=$FWMP_BASE_CORES"
+echo "base_ds=$FWMP_BASE_DS"
+echo "total_cores=$FWMP_TOTAL_CORES"
 echo "scorep=$FWMP_SCOREP"
 if [ "$FWMP_SCOREP" = "1" ]; then
     echo "scorep_dir=$SCOREP_DIR"

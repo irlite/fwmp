@@ -50,10 +50,19 @@ if [ -z "${FWMP_BASE_OUTPUT_DIR:-}" ]; then
 fi
 
 export FWMP_SCOREP="${FWMP_SCOREP:-0}"
+export FWMP_LIKWID="${FWMP_LIKWID:-0}"
+FWMP_LIKWID_GROUP="${FWMP_LIKWID_GROUP:-MEM}"
+FWMP_LIKWID_MARKER="${FWMP_LIKWID_MARKER:-0}"
+
+if [ "$FWMP_SCOREP" = "1" ] && [ "$FWMP_LIKWID" = "1" ]; then
+    echo "ERROR: FWMP_SCOREP and FWMP_LIKWID are mutually exclusive"
+    exit 1
+fi
 
 SCOREP_DIR="${FWMP_BASE_OUTPUT_DIR}/scorep_${LABEL}"
+LIKWID_DIR="${FWMP_BASE_OUTPUT_DIR}/likwid_${LABEL}"
 
-RUN_CMD=(python -u elastic_blosc_weak.py)
+RUN_CMD=(python -u elastic_blosc.py)
 
 if [ "$FWMP_SCOREP" = "1" ]; then
     mkdir -p "$SCOREP_DIR"
@@ -69,7 +78,32 @@ if [ "$FWMP_SCOREP" = "1" ]; then
     export SCOREP_MPI_ENABLE_GROUPS=ALL
     export SCOREP_OPENMP_ENABLE=true
 
-    RUN_CMD=(python -m scorep --mpp=mpi --thread=omp elastic_blosc_weak.py)
+    RUN_CMD=(python -m scorep --mpp=mpi --thread=omp elastic_blosc.py)
+fi
+
+if [ "$FWMP_LIKWID" = "1" ]; then
+    module load likwid
+    mkdir -p "$LIKWID_DIR"
+
+    # avoid compression threads polluting pinned-core counters
+    export BLOSC_NTHREADS=1
+
+    LIKWID_CORES="N:0-$((SLURM_CPUS_PER_TASK - 1))"
+    LIKWID_OUT="${LIKWID_DIR}/likwid_${SLURM_PROCID:-0}.csv"
+
+    if [ "$FWMP_LIKWID_MARKER" = "1" ]; then
+        # requires LIKWID_MARKER_START/STOP in the C kernel and
+        # likwid_marker_init/close exposed + called from python,
+        # gated on os.environ["LIKWID_MODE"]
+        export LIKWID_MODE=1
+        RUN_CMD=(likwid-perfctr -C "$LIKWID_CORES" -g "$FWMP_LIKWID_GROUP" \
+                     -m -O -o "$LIKWID_OUT" python -u elastic_blosc.py)
+    else
+        # whole-process measurement, no code changes needed
+        export LIKWID_MODE=0
+        RUN_CMD=(likwid-perfctr -C "$LIKWID_CORES" -g "$FWMP_LIKWID_GROUP" \
+                     -O -o "$LIKWID_OUT" python -u elastic_blosc.py)
+    fi
 fi
 
 echo "----------------------------------------"
@@ -81,13 +115,25 @@ echo "scorep=$FWMP_SCOREP"
 if [ "$FWMP_SCOREP" = "1" ]; then
     echo "scorep_dir=$SCOREP_DIR"
 fi
+echo "likwid=$FWMP_LIKWID"
+if [ "$FWMP_LIKWID" = "1" ]; then
+    echo "likwid_group=$FWMP_LIKWID_GROUP"
+    echo "likwid_marker=$FWMP_LIKWID_MARKER"
+    echo "likwid_dir=$LIKWID_DIR"
+fi
 echo "----------------------------------------"
 
 mkdir -p "$JOB_DIR"
 export FWMP_BASE_OUTPUT_DIR="$JOB_DIR"
 
-srun --distribution=block:block --cpu-bind=cores \
-    /usr/bin/time -v "${RUN_CMD[@]}"
+if [ "$FWMP_LIKWID" = "1" ]; then
+    # let likwid-perfctr do the pinning itself, don't let slurm fight it
+    srun --distribution=block:block --cpu-bind=none \
+        "${RUN_CMD[@]}"
+else
+    srun --distribution=block:block --cpu-bind=cores \
+        /usr/bin/time -v "${RUN_CMD[@]}"
+fi
 
 if [ "$FWMP_SCOREP" = "1" ]; then
     echo "----------------------------------------"
@@ -101,6 +147,13 @@ if [ "$FWMP_SCOREP" = "1" ]; then
         echo "otf2-print not available"
     fi
 
+    echo "----------------------------------------"
+fi
+
+if [ "$FWMP_LIKWID" = "1" ]; then
+    echo "----------------------------------------"
+    echo "LIKWID results: $LIKWID_DIR"
+    ls -la "$LIKWID_DIR" || true
     echo "----------------------------------------"
 fi
 
