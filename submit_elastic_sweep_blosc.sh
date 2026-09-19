@@ -1,17 +1,17 @@
 #!/bin/bash
 set -euo pipefail
-GEN=99
-WEAK_SCALING=true
+GEN=110
+WEAK_SCALING=false
 EXCLUSIVE=false
 BASE_CORES=1
 #BASE_DS=39
 BASE_DS=47
 STRONG_DS=1
 CONFIGS=(
-  "1 2 32"
-  "2 2 32"
-  "4 2 32"
-  "8 2 32"
+  "2 3 32"
+  "4 3 32"
+  "8 3 32"
+  "10 3 32"
 )
 CONFIGSS=(
   "1 2 32"
