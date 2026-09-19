@@ -27,21 +27,21 @@ vp_path = "../data/MODEL_P-WAVE_VELOCITY_1.25m.segy"
 vs_path = "../data/MODEL_S-WAVE_VELOCITY_1.25m.segy"
 rho_path = "../data/MODEL_DENSITY_1.25m.segy"
 
-lib = ctypes.CDLL(os.path.join(os.path.dirname(__file__), "libelastic_kernels.so"))
+lib = ctypes.CDLL(os.path.join(os.path.dirname(__file__), "libelastic_kernels_tiled.so"))
 _float2 = np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags="C_CONTIGUOUS")
 
-lib.update_stress.argtypes = [
+lib.update_stress_velocity_interior.argtypes = [
     _float2, _float2,
     _float2, _float2, _float2,
-    _float2, _float2, _float2, _float2,
+    _float2, _float2, _float2, _float2, _float2,
     ctypes.c_float, ctypes.c_float, ctypes.c_float,
     ctypes.c_int, ctypes.c_int,
     ctypes.c_int, ctypes.c_int,
     ctypes.c_int, ctypes.c_int
 ]
-lib.update_stress.restype = None
+lib.update_stress_velocity_interior.restype = None
 
-lib.update_velocity.argtypes = [
+lib.update_velocity_boundary.argtypes = [
     _float2, _float2,
     _float2, _float2, _float2,
     _float2, _float2,
@@ -50,7 +50,7 @@ lib.update_velocity.argtypes = [
     ctypes.c_int, ctypes.c_int,
     ctypes.c_int, ctypes.c_int
 ]
-lib.update_velocity.restype = None
+lib.update_velocity_boundary.restype = None
 
 comm.Barrier()
 
@@ -175,19 +175,19 @@ def exchange_backward_halos(fields):
         for k, a in enumerate(fields):
             a[0, 1:-1] = recv_minus[k, :]
 
-def update_stress_c(vx, vz, sxx, szz, sxz, lam, lam2mu, mu, damp, dt, dx, dz, iz0, iz1, jx0, jx1):
-    lib.update_stress(
+def update_stress_velocity_interior_c(vx, vz, sxx, szz, sxz, lam, lam2mu, mu, inv_rho, damp, dt, dx, dz, iz0, iz1, jx0, jx1):
+    lib.update_stress_velocity_interior(
         vx, vz,
         sxx, szz, sxz,
-        lam, lam2mu, mu, damp,
+        lam, lam2mu, mu, inv_rho, damp,
         np.float32(dt), np.float32(dx), np.float32(dz),
         vx.shape[0], vx.shape[1],
         iz0, iz1,
         jx0, jx1
     )
 
-def update_velocity_c(vx, vz, sxx, szz, sxz, inv_rho, damp, dt, dx, dz, iz0, iz1, jx0, jx1):
-    lib.update_velocity(
+def update_velocity_boundary_c(vx, vz, sxx, szz, sxz, inv_rho, damp, dt, dx, dz, iz0, iz1, jx0, jx1):
+    lib.update_velocity_boundary(
         vx, vz, sxx, szz, sxz,
         inv_rho, damp,
         np.float32(dt), np.float32(dx), np.float32(dz),
@@ -431,8 +431,8 @@ h5.attrs["n_frames"] = n_frames
 h5.attrs["scale_mode"] = scale_mode
 h5.attrs["total_cores"] = total_cores
 
-update_stress_c(vx, vz, sxx, szz, sxz, lam_loc, lam2mu_loc, mu_loc, damp_loc, dt, dx, dz, iz0, iz1, jx0, jx1)
-update_velocity_c(vx, vz, sxx, szz, sxz, inv_rho_loc, damp_loc, dt, dx, dz, iz0, iz1, jx0, jx1)
+update_stress_velocity_interior_c(vx, vz, sxx, szz, sxz, lam_loc, lam2mu_loc, mu_loc, inv_rho_loc, damp_loc, dt, dx, dz, iz0, iz1, jx0, jx1)
+update_velocity_boundary_c(vx, vz, sxx, szz, sxz, inv_rho_loc, damp_loc, dt, dx, dz, iz0, iz1, jx0, jx1)
 
 vx.fill(0.0)
 vz.fill(0.0)
@@ -453,11 +453,11 @@ def step(it):
         if direct_vz_source:
             vz[li, lj] += np.float32(dt * inv_rho_loc[li, lj] * src)
 
-    update_stress_c(vx, vz, sxx, szz, sxz, lam_loc, lam2mu_loc, mu_loc, damp_loc, dt, dx, dz, iz0, iz1, jx0, jx1)
+    update_stress_velocity_interior_c(vx, vz, sxx, szz, sxz, lam_loc, lam2mu_loc, mu_loc, inv_rho_loc, damp_loc, dt, dx, dz, iz0, iz1, jx0, jx1)
 
     exchange_backward_halos([sxx, szz, sxz])
 
-    update_velocity_c(vx, vz, sxx, szz, sxz, inv_rho_loc, damp_loc, dt, dx, dz, iz0, iz1, jx0, jx1)
+    update_velocity_boundary_c(vx, vz, sxx, szz, sxz, inv_rho_loc, damp_loc, dt, dx, dz, iz0, iz1, jx0, jx1)
 
 frame_id = 0
 
@@ -512,5 +512,4 @@ if rank == 0:
         vf.attrs["dt"] = float(dt)
         vf.attrs["frame_stride"] = frame_stride
         vf.attrs["n_frames"] = n_frames
-
     print("done", flush=True)

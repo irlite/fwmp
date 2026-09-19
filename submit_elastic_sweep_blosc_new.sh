@@ -1,21 +1,24 @@
 #!/bin/bash
 set -euo pipefail
-GEN=99
-SCALE_MODE=weak
+GEN=101
+SCALE_MODE=strong #weak
 BASE_CORES=1
 BASE_DS=23
 CONFIGS=(
+  "2 3 32"
+  "4 3 32"
+  "8 3 32"
+  "10 3 32"
+)
+CONFIGSS=(
   "1 1 1"
   "1 1 16"
   "1 1 32"
   "1 2 32"
+  "1 3 16"
+  "1 5 16"
   "1 3 32"
-  "1 2 32"
-  "2 2 32"
-  "4 2 32"
-  "8 2 32"
-)
-CONFIGSS=(
+
   "1 2 32"
   "2 2 32"
   "4 2 32"

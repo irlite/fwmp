@@ -19,6 +19,10 @@ gcc -O3 -fopenmp -fPIC -shared \
     src/elastic_kernels.c \
     -o src/libelastic_kernels.so
 
+gcc -O3 -fopenmp -fPIC -shared \
+    src/elastic_kernels_tiled.c \
+    -o src/libelastic_kernels_tiled.so
+
 source .venv/bin/activate
 
 python -m pip install --upgrade pip

@@ -4,7 +4,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=32G
-#SBATCH --time=01:00:00
+#SBATCH --time=0:15:00
 #SBATCH --job-name=elastic
 #SBATCH --output=elastic_%j.out
 #SBATCH --error=elastic_%j.err
@@ -58,7 +58,7 @@ export FWMP_SCOREP="${FWMP_SCOREP:-0}"
 
 SCOREP_DIR="${FWMP_BASE_OUTPUT_DIR}/scorep_${LABEL}"
 
-RUN_CMD=(python -u elastic_blosc_new.py)
+RUN_CMD=(python -u elastic_tiled.py)
 
 if [ "$FWMP_SCOREP" = "1" ]; then
     mkdir -p "$SCOREP_DIR"
@@ -74,7 +74,7 @@ if [ "$FWMP_SCOREP" = "1" ]; then
     export SCOREP_MPI_ENABLE_GROUPS=ALL
     export SCOREP_OPENMP_ENABLE=true
 
-    RUN_CMD=(python -m scorep --mpp=mpi --thread=omp elastic_blosc_new.py)
+    RUN_CMD=(python -m scorep --mpp=mpi --thread=omp elastic_tiled.py)
 fi
 
 echo "----------------------------------------"
@@ -112,5 +112,5 @@ if [ "$FWMP_SCOREP" = "1" ]; then
     echo "----------------------------------------"
 fi
 
-#rm -rf "$JOB_DIR"
+rm -rf "$JOB_DIR"
 echo "cleanup done"
