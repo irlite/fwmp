@@ -4,7 +4,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=32G
-#SBATCH --time=07:00:00
+#SBATCH --time=00:10:00
 #SBATCH --job-name=elastic_seq_tiled
 #SBATCH --output=elastic_seq_tiled_%j.out
 #SBATCH --error=elastic_seq_tiled_%j.err
@@ -38,6 +38,8 @@ cd "$PROJECT_ROOT"
 source .venv/bin/activate
 cd src
 
+LOG_DIR="$OUTPUT_ROOT/logs"
+mkdir -p "$LOG_DIR"
 mkdir -p "$FWMP_BASE_OUTPUT_DIR"
 
 echo "job_id=$SLURM_JOB_ID"
@@ -52,4 +54,9 @@ echo "tile_x=$FWMP_TILE_X"
 srun --ntasks=1 --cpus-per-task=1 --cpu-bind=cores \
     /usr/bin/time -v python -u elastic_lz4_seq_tiled.py
 
-echo "output retained at $FWMP_BASE_OUTPUT_DIR"
+rm -rf "$FWMP_BASE_OUTPUT_DIR"
+
+mv "elastic_seq_tiled_${SLURM_JOB_ID}.out" "$LOG_DIR/"
+mv "elastic_seq_tiled_${SLURM_JOB_ID}.err" "$LOG_DIR/"
+
+echo "logs saved to $LOG_DIR"

@@ -14,12 +14,15 @@ static int tile_z_value(void) {
 
     if (!initialized) {
         const char *text = getenv("FWMP_TILE_Z");
+
         if (text != NULL) {
             const int requested = atoi(text);
+
             if (requested > 0) {
                 value = requested;
             }
         }
+
         initialized = 1;
     }
 
@@ -32,12 +35,15 @@ static int tile_x_value(void) {
 
     if (!initialized) {
         const char *text = getenv("FWMP_TILE_X");
+
         if (text != NULL) {
             const int requested = atoi(text);
+
             if (requested > 0) {
                 value = requested;
             }
         }
+
         initialized = 1;
     }
 
@@ -45,16 +51,16 @@ static int tile_x_value(void) {
 }
 
 void update_stress_velocity_seq_tiled(
-    float * restrict vx,
-    float * restrict vz,
-    float * restrict sxx,
-    float * restrict szz,
-    float * restrict sxz,
-    const float * restrict lam,
-    const float * restrict lam2mu,
-    const float * restrict mu,
-    const float * restrict inv_rho,
-    const float * restrict damp,
+    float *restrict vx,
+    float *restrict vz,
+    float *restrict sxx,
+    float *restrict szz,
+    float *restrict sxz,
+    const float *restrict lam,
+    const float *restrict lam2mu,
+    const float *restrict mu,
+    const float *restrict inv_rho,
+    const float *restrict damp,
     float dt,
     float dx,
     float dz,
@@ -108,7 +114,6 @@ void update_stress_velocity_seq_tiled(
                 const int row = i * nx;
                 const int rowp = row + nx;
 
-                #pragma omp simd
                 for (int j = jb; j < je; ++j) {
                     const int k = row + j;
 
@@ -146,7 +151,6 @@ void update_stress_velocity_seq_tiled(
                 const int row = i * nx;
                 const int rowm = row - nx;
 
-                #pragma omp simd
                 for (int j = jb; j < je; ++j) {
                     const int k = row + j;
 
