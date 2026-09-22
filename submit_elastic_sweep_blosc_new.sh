@@ -1,14 +1,11 @@
 #!/bin/bash
 set -euo pipefail
-GEN=102
+GEN=104
 SCALE_MODE=weak #weak
 BASE_CORES=1
-BASE_DS=31
+MAX_CORES=960
 CONFIGS=(
-  "2 3 32"
-  "4 3 32"
-  "8 3 32"
-  "10 3 32"
+  "1 3 32"
 )
 CONFIGSS=(
   "1 1 1"
@@ -36,6 +33,18 @@ CONFIGSS=(
   "1 3 32"
 )
 BASE_OUT="/user/maxim.barnstorf/u27934/fwmp/opt_fast_drive"
+
+base_ds_for_max_cores() {
+    local max_cores=$1
+    local root=0
+    while (( root + 1 <= max_cores / (root + 1) )); do
+        root=$((root + 1))
+    done
+    printf '%d\n' "$((root + 1))"
+}
+
+BASE_DS=$(base_ds_for_max_cores "$MAX_CORES")
+
 mkdir -p "${BASE_OUT}"
 mkdir -p "${BASE_OUT}/gen${GEN}/logs"
 PREV_JOB=""

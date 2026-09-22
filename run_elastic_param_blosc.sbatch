@@ -104,5 +104,5 @@ if [ "$FWMP_SCOREP" = "1" ]; then
     echo "----------------------------------------"
 fi
 
-#rm -rf "$JOB_DIR"
+rm -rf "$JOB_DIR"
 echo "cleanup done"
