@@ -1,6 +1,6 @@
 #!/bin/bash
 set -euo pipefail
-GEN=110
+GEN=1x_old_blosc
 WEAK_SCALING=false
 EXCLUSIVE=false
 BASE_CORES=1
@@ -8,10 +8,26 @@ BASE_CORES=1
 BASE_DS=47
 STRONG_DS=1
 CONFIGS=(
-  "2 3 32"
-  "4 3 32"
-  "8 3 32"
-  "10 3 32"
+  "1 2 32"
+  "1 2 32"
+  "1 2 32"
+  "1 2 32"
+  "2 2 32"
+  "2 2 32"
+  "2 2 32"
+  "2 2 32"
+  "4 2 32"
+  "4 2 32"
+  "4 2 32"
+  "4 2 32"
+  "8 2 32"
+  "8 2 32"
+  "8 2 32"
+  "8 2 32"
+  "10 2 32"
+  "10 2 32"
+  "10 2 32"
+  "10 2 32"
 )
 CONFIGSS=(
   "1 2 32"

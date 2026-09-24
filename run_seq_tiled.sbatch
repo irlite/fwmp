@@ -8,7 +8,6 @@
 #SBATCH --job-name=elastic_seq_tiled
 #SBATCH --output=/mnt/vast-standard/home/maxim.barnstorf/u27934/fwmp/opt_fast_drive/seq_tiled/logs/elastic_seq_tiled_%j.out
 #SBATCH --error=/mnt/vast-standard/home/maxim.barnstorf/u27934/fwmp/opt_fast_drive/seq_tiled/logs/elastic_seq_tiled_%j.err
-#SBATCH --exclude=c0011
 
 set -euo pipefail
 

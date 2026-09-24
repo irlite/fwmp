@@ -4,11 +4,10 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=32G
-#SBATCH --time=01:00:00
+#SBATCH --time=00:20:00
 #SBATCH --job-name=elastic
 #SBATCH --output=elastic_%j.out
 #SBATCH --error=elastic_%j.err
-#SBATCH --exclude=c0011
 
 set -euo pipefail
 

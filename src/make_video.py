@@ -1,5 +1,6 @@
 import sys
 import h5py
+import hdf5plugin
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, FFMpegWriter

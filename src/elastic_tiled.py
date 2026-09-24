@@ -75,7 +75,12 @@ vds_path = os.path.join(base_output_dir, "elastic_wavefield.h5")
 
 def load_segy(path):
     with segyio.open(path, "r", ignore_geometry=True) as f:
-        return np.stack([np.asarray(trace) for trace in f.trace]).T
+        n_traces = f.tracecount
+        n_samples = len(f.samples)
+        data = np.empty((n_samples, n_traces), dtype=np.float32)
+        for ix in range(n_traces):
+            data[:, ix] = f.trace[ix]
+        return data
 
 def resample_field(a, nz_target, nx_target):
     nz_source, nx_source = a.shape
