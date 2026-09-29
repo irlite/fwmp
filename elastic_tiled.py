@@ -24,7 +24,7 @@ cpus_per_task = int(os.environ.get("SLURM_CPUS_PER_TASK", os.environ.get("OMP_NU
 # gzip writes slower, but plain HDF5 tools can read it without hdf5plugin.
 # lz4 uses the plain LZ4 filter, not blosc, and ignores the level.
 # The level defaults to 4 for gzip and 3 otherwise, same as fwmp.py.
-compression = os.environ.get("FWMP_COMPRESSION", "lz4").strip().lower()
+compression = os.environ.get("FWMP_COMPRESSION", "blosc").strip().lower()
 if compression not in ("none", "gzip", "blosc", "lz4"):
     raise SystemExit(
         f"FWMP_COMPRESSION={compression!r}; use none, gzip, blosc or lz4"
