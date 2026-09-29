@@ -1,15 +1,14 @@
 /*
- * Level 1 of 4: naive OpenMP.
+ * Level 1 of 4: plain OpenMP.
  *
- * The version you write first. Stick "#pragma omp parallel for" on the outer
- * loop, confirm the answer is still right, move on.
+ * One "#pragma omp parallel for" on the outer loop and nothing else.
  *
- * What is deliberately missing, because later levels add it back:
- *   - no "restrict", so the compiler must assume vx and sxx might overlap and
- *     cannot keep anything in registers across a store
- *   - no "omp simd", and with the aliasing above it will not auto-vectorise
- *   - no schedule clause
- *   - row offsets recomputed as i*nx inside the inner loop
+ * Left out on purpose, since later levels add them:
+ *   - no "restrict". The compiler must assume vx and sxx may overlap, so it
+ *     reloads values after every store.
+ *   - no "omp simd". Without restrict, the compiler won't vectorise.
+ *   - no schedule clause.
+ *   - row offsets recomputed as i*nx in the inner loop.
  *
  * Build:
  *   gcc -O3 -fopenmp -march=native -fPIC -shared \
@@ -33,7 +32,7 @@ void update_stress(
     const float dtx = dt / dx;
     const float dtz = dt / dz;
 
-    /* The caller's bounds can reach the halo; the stencil reads i+1 and j+1. */
+    /* The bounds can reach the halo, and the stencil reads i+1 and j+1. */
     if (iz0 < 1) iz0 = 1;
     if (iz1 > nz - 1) iz1 = nz - 1;
 

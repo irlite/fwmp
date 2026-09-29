@@ -1,31 +1,14 @@
 """
-2D elastic wave simulation, MPI-parallel, writing vz snapshots to HDF5.
+2D elastic wave simulation with MPI. Writes vz snapshots to HDF5.
 
-This is the merge of the fourteen elastic*.py files that used to sit in src/.
-They all ran identical physics; what differed was how each rank got its frames
-onto disk.
-
-Six things are worth changing per run and are command-line options:
-
+Options:
     --niter --frame-stride --downsample --compression --output-dir --kernel-lib
 
-Everything else lives in the Settings block below. That includes the sponge
-width, the source, and the write strategy (batched, direct or async writes, and
-node-local staging), all of which still work; they are just not worth a flag.
-
-The finite-difference kernels are C with OpenMP, reached through ctypes, and
-come in four optimisation levels. Pick one with --kernel-lib. Build them with:
-
+Build the kernels:
     gcc -O3 -fopenmp -march=native -fPIC -shared \
         -o libelastic_kernels_v2.so elastic_kernels_v2_simd.c
 
-Every rank writes its own tile to output/<job>/rank_NNNN/elastic_wavefield.h5.
-Rank 0 then builds a virtual dataset at output/<job>/elastic_wavefield.h5 that
-makes all those tiles look like one array.
-
-Score-P stays off unless FWMP_SCOREP=1 is set. That one is an environment
-variable rather than a flag because scorep.user has to be imported before
-anything touches MPI, long before argparse runs.
+Set FWMP_SCOREP=1 to turn on Score-P regions.
 """
 
 import argparse
@@ -38,9 +21,7 @@ import threading
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 
-# Blosc spins up its own thread pool. Inside an MPI rank that already owns a
-# fixed set of cores that just means oversubscription, so hold it to one thread.
-# This has to happen before hdf5plugin is imported.
+
 os.environ.setdefault("BLOSC_NTHREADS", "1")
 
 import numpy as np
@@ -50,9 +31,6 @@ import segyio
 try:
     from mpi4py import MPI
 except Exception as mpi_import_error:
-    # A pip-installed mpi4py wheel dlopens libmpi.so at import time and fails if
-    # the cluster's MPI is not on the loader path. Every rank hits this at once,
-    # so a full traceback from each is unreadable. Say the useful part instead.
     sys.exit(
         f"mpi4py could not start MPI: {mpi_import_error}\n"
         "Usually this means mpi4py was installed from a wheel instead of being\n"
@@ -64,42 +42,33 @@ except Exception as mpi_import_error:
 
 SCRIPT_DIRECTORY = os.path.dirname(os.path.abspath(__file__))
 
-# ---------------------------------------------------------------------------
-# Settings
-#
-# These were command-line options once. In practice nothing ever changed them
-# per run, so they live here instead. Edit and rerun.
-# ---------------------------------------------------------------------------
 
-# Absorbing boundary thickness in cells. The padded grid is the model plus
-# twice this in each direction, so it dominates memory and runtime. A thin
-# sponge reflects energy back into the model.
 SPONGE_WIDTH = 240
 
 # Ricker wavelet.
 SOURCE_FREQUENCY = 8.0        # Hz
 SOURCE_AMPLITUDE = 1e9
-INJECT_SOURCE_INTO_VZ = False  # otherwise the source only enters the stresses
+INJECT_SOURCE_INTO_VZ = False  # if False, the source only goes into the stresses
 
-# SEG-Y file names, looked for in data/ beside this script or one level up.
+# SEG-Y files, looked up in data/ next to this script or one level up.
 VP_MODEL_FILE = "MODEL_P-WAVE_VELOCITY_1.25m.segy"
 VS_MODEL_FILE = "MODEL_S-WAVE_VELOCITY_1.25m.segy"
 DENSITY_MODEL_FILE = "MODEL_DENSITY_1.25m.segy"
 
-# How frames reach the file.
-#   batched  buffer FRAMES_PER_FLUSH frames and write them in one go
-#   direct   one dataset write per frame, least memory
-#   async    writer thread on its own core, needs 2+ cores per rank
+# How frames get written.
+#   batched  hold FRAMES_PER_FLUSH frames, then write them together
+#   direct   one write per frame, least memory
+#   async    a writer thread on its own core, needs 2+ cores per rank
 WRITE_MODE = "batched"
 FRAMES_PER_FLUSH = 8
 IO_BUFFER_COUNT = 2
 
-# Write to node-local disk and copy to the output directory at the end, which
-# keeps the shared filesystem out of the time loop. None means $TMPDIR.
+# Write to node-local disk and copy to the output directory at the end.
+# None means $TMPDIR.
 STAGE_ON_LOCAL_DISK = False
 LOCAL_DISK_DIRECTORY = None
 
-# Compression detail. The filter itself is --compression.
+# Compression settings. --compression picks the filter.
 GZIP_LEVEL = 4
 BLOSC_LEVEL = 3
 TARGET_CHUNK_MEGABYTES = 8.0
@@ -107,11 +76,11 @@ TARGET_CHUNK_MEGABYTES = 8.0
 # Cell size of the SEG-Y models in metres, before downsampling.
 MODEL_CELL_SIZE_METRES = 1.25
 
-# Courant number. Time step is COURANT_NUMBER * cell_size / fastest_velocity.
+# dt = COURANT_NUMBER * cell_size / max velocity.
 COURANT_NUMBER = 0.4
 
-# Peak absorption at the outer edge of the sponge, 1/s. The bottom gets twice
-# the sides and top because that is where most of the energy ends up.
+# Peak absorption at the outer edge of the sponge, in 1/s. The bottom is
+# twice the sides and top because most energy goes down.
 ABSORPTION_SIDES = 60.0
 ABSORPTION_BOTTOM = 120.0
 
@@ -121,7 +90,7 @@ ABSORPTION_BOTTOM = 120.0
 # ---------------------------------------------------------------------------
 
 def _load_scorep():
-    """Import scorep.user if FWMP_SCOREP is set, otherwise return None."""
+    """Return scorep.user if FWMP_SCOREP is set, else None."""
     requested = os.environ.get("FWMP_SCOREP", "")
     if requested.strip().lower() not in ("1", "true", "yes", "on"):
         return None
@@ -134,8 +103,7 @@ def _load_scorep():
         import scorep.user
         return scorep.user
     except ImportError:
-        # Asking for Score-P without the module installed shouldn't kill a run
-        # that would otherwise be fine. You just get no trace.
+        # Run without a trace instead of failing.
         return None
 
 
@@ -143,7 +111,7 @@ SCOREP_USER = _load_scorep()
 
 
 def scorep_region(name):
-    """Named Score-P region, or a do-nothing context manager when it's off."""
+    """Named Score-P region, or a no-op when Score-P is off."""
     if SCOREP_USER is not None and hasattr(SCOREP_USER, "region"):
         return SCOREP_USER.region(name)
     return nullcontext()
@@ -154,12 +122,7 @@ def scorep_region(name):
 # ---------------------------------------------------------------------------
 
 def find_data_directory():
-    """
-    Locate data/, whether the script sits beside it or one level down.
-
-    Both layouts are in use: fwmp.py at the top of the repo next to data/, and
-    fwmp.py in src/ with data/ as a sibling of src/.
-    """
+    """Find data/ next to this script, or next to its parent (src/ layout)."""
     candidates = [
         os.path.join(SCRIPT_DIRECTORY, "data"),
         os.path.join(os.path.dirname(SCRIPT_DIRECTORY), "data"),
@@ -237,19 +200,16 @@ def parse_arguments(argv=None):
 def load_segy_model(path, downsample):
     """Read a SEG-Y file into a (rows, columns) float32 array."""
     with segyio.open(path, "r", ignore_geometry=True) as segy_file:
-        # Traces are columns of the model, so stacking them gives (columns,
-        # rows) and needs a transpose.
+        # Each trace is a column, so transpose after stacking.
         model = np.stack([np.array(trace) for trace in segy_file.trace]).T
     return model[::downsample, ::downsample].astype(np.float32)
 
 
 def extend_edges(model, sponge_width):
     """
-    Wrap a model in `sponge_width` cells of padding on all four sides.
+    Pad a model by sponge_width cells on every side, copying the edge values.
 
-    The padding repeats the outermost row or column rather than tapering to
-    zero, because a jump in material properties at the edge would reflect waves
-    straight back into the region we care about.
+    Padding with zeros would create a sharp jump that reflects waves back in.
     """
     model_rows, model_columns = model.shape
     padded = np.empty(
@@ -266,8 +226,7 @@ def extend_edges(model, sponge_width):
     top_edge = sponge_width
     bottom_edge = sponge_width + model_rows
 
-    # Columns first, then rows. The row pass then copies whole rows that already
-    # include the left and right padding, which fills the corners for free.
+    # Pad columns first so the row pass also fills the corners.
     padded[:, :left_edge] = padded[:, left_edge:left_edge + 1]
     padded[:, right_edge:] = padded[:, right_edge - 1:right_edge]
     padded[:top_edge, :] = padded[top_edge:top_edge + 1, :]
@@ -290,7 +249,7 @@ class MaterialModel:
 
 
 def build_material_model(p_velocity, s_velocity, density, sponge_width):
-    """Pad the input models and turn velocities and density into elastic moduli."""
+    """Pad the models and compute the elastic moduli."""
     padded_p_velocity = extend_edges(p_velocity, sponge_width)
     padded_s_velocity = extend_edges(s_velocity, sponge_width)
     padded_density = extend_edges(density, sponge_width)
@@ -314,11 +273,10 @@ def build_material_model(p_velocity, s_velocity, density, sponge_width):
 
 def build_absorption_factors(grid_rows, grid_columns, sponge_width, time_step):
     """
-    Per-cell damping multiplier for the sponge layer.
+    Damping factor per cell for the sponge layer.
 
-    Absorption ramps up quadratically to its peak at the outer boundary; a
-    sudden jump would reflect almost as badly as no sponge. The kernels apply
-    this after every update, and the interior is exactly 1.0.
+    Absorption grows quadratically toward the outer edge. The interior is 1.0.
+    The kernels multiply by this after every update.
     """
     absorption_rate = np.zeros((grid_rows, grid_columns), dtype=np.float32)
     ramp = np.linspace(0.0, 1.0, sponge_width, dtype=np.float32) ** 2
@@ -346,7 +304,7 @@ def build_absorption_factors(grid_rows, grid_columns, sponge_width, time_step):
 
 @dataclass
 class Domain:
-    """One rank's tile of the padded grid, and which ranks hold the neighbours."""
+    """This rank's tile of the padded grid and its neighbour ranks."""
     cartesian_comm: object
     rank: int
     rank_count: int
@@ -354,11 +312,11 @@ class Domain:
     rank_grid_columns: int
     grid_row: int                 # this rank's position in the rank grid
     grid_column: int
-    neighbour_above: int          # MPI.PROC_NULL at the edge of the grid
+    neighbour_above: int          # MPI.PROC_NULL at the grid edge
     neighbour_below: int
     neighbour_left: int
     neighbour_right: int
-    row_start: int                # tile extent in global padded coordinates
+    row_start: int                # tile extent in padded grid coordinates
     row_stop: int
     column_start: int
     column_stop: int
@@ -373,7 +331,7 @@ class Domain:
 
 
 def split_evenly(total, parts, index):
-    """Divide `total` cells over `parts` ranks, remainder to the lowest indices."""
+    """Split total cells over parts ranks. Lower indices get the remainder."""
     sizes = [total // parts + (1 if i < total % parts else 0) for i in range(parts)]
     start = sum(sizes[:index])
     return start, start + sizes[index]
@@ -381,11 +339,10 @@ def split_evenly(total, parts, index):
 
 def choose_rank_grid(rank_count, grid_rows, grid_columns):
     """
-    Pick a 2D arrangement of ranks that keeps tiles as square as possible.
+    Pick the rank layout with the most square tiles.
 
-    Halo traffic scales with a tile's perimeter, so the factorisation with the
-    smallest tile_rows + tile_columns wins. Arrangements that would starve a
-    rank are skipped.
+    Halo traffic grows with tile perimeter, so pick the smallest
+    tile_rows + tile_columns. Skip layouts that leave a rank with no cells.
     """
     best_arrangement = None
     best_perimeter = None
@@ -403,8 +360,7 @@ def choose_rank_grid(rank_count, grid_rows, grid_columns):
             best_arrangement = (rows, columns)
 
     if best_arrangement is None:
-        # Every factorisation starves someone. Let MPI decide and let the
-        # emptiness check below produce a clear error.
+        # No layout works. Let MPI pick one and let create_domain report the error.
         best_arrangement = MPI.Compute_dims(rank_count, 2)
 
     return int(best_arrangement[0]), int(best_arrangement[1])
@@ -459,11 +415,10 @@ def create_domain(comm, grid_rows, grid_columns):
 
 def add_halo_ring(tile):
     """
-    Put a one-cell border around a tile, seeded from the tile's own edges.
+    Add a one-cell border to a tile, filled from the tile's edges.
 
-    Material borders are never exchanged, so the seeding is all there is.
-    Wavefield borders are overwritten by the halo exchange each step, and the
-    seeding only matters at the outermost ranks with no neighbour to hear from.
+    Material borders are never exchanged, so this fill is final. Wavefield
+    borders get overwritten by the halo exchange, except at the outer ranks.
     """
     bordered = np.empty((tile.shape[0] + 2, tile.shape[1] + 2), dtype=tile.dtype)
 
@@ -478,7 +433,7 @@ def add_halo_ring(tile):
 
 @dataclass
 class LocalMaterial:
-    """This rank's slice of the material model, each array with a halo ring."""
+    """This rank's slice of the material model, with halo rings."""
     shear_modulus: np.ndarray
     lame_first: np.ndarray
     lame_first_plus_two_mu: np.ndarray
@@ -502,17 +457,16 @@ def extract_local_material(material, absorption, domain):
 
 class HaloExchanger:
     """
-    Nearest-neighbour halo exchange on the staggered grid.
+    Halo exchange with the four neighbour ranks on the staggered grid.
 
-    Two exchanges per step, moving data in opposite directions: the stress
-    update reads velocities one cell towards the origin, the velocity update
-    reads stresses one cell away from it. Get the direction wrong and the
-    result still looks plausible, just wrong at the tile seams.
+    There are two exchanges per step, in opposite directions. The stress
+    update reads velocities one cell toward the origin. The velocity update
+    reads stresses one cell away from it. A wrong direction gives errors only
+    at tile seams, which are easy to miss.
     """
 
-    # Separate tags per direction and axis. Without them a rank that falls
-    # behind can have its column exchange matched against a neighbour's row
-    # exchange, which corrupts the halo in a way that is horrible to debug.
+    # One tag per direction and axis, so a slow rank can't match a column
+    # message with a row message.
     TAG_INWARD_COLUMNS = 10
     TAG_INWARD_ROWS = 20
     TAG_OUTWARD_COLUMNS = 30
@@ -526,7 +480,7 @@ class HaloExchanger:
         self.row_receive = np.empty((max_fields, domain.tile_columns), dtype=np.float32)
 
     def exchange_inward(self, fields):
-        """Send the first interior row and column to the left/upper neighbours."""
+        """Send the first interior row and column to the upper and left ranks."""
         self._exchange(
             fields,
             send_offset=1,
@@ -540,7 +494,7 @@ class HaloExchanger:
         )
 
     def exchange_outward(self, fields):
-        """Send the last interior row and column to the right/lower neighbours."""
+        """Send the last interior row and column to the lower and right ranks."""
         self._exchange(
             fields,
             send_offset=-2,
@@ -589,11 +543,10 @@ class HaloExchanger:
 @dataclass
 class KernelBounds:
     """
-    Half-open index window the C kernels update, in halo-inclusive coordinates.
+    Index range the C kernels update, counting the halo. End is exclusive.
 
-    Interior cells run from 1 to tile_rows inclusive. A rank holding the top or
-    bottom of the whole grid steps one cell further in, because the stencil
-    would otherwise read off the end of the array.
+    Interior cells are 1 to tile_rows. Ranks at the top or bottom of the grid
+    stop one cell short so the stencil stays inside the array.
     """
     row_begin: int
     row_end: int
@@ -614,13 +567,12 @@ def compute_kernel_bounds(domain, grid_rows):
 @dataclass
 class OutputWindow:
     """
-    Where this rank's tile overlaps the real model, ignoring the sponge.
+    The part of this rank's tile that lies inside the model, not the sponge.
 
-    Ranks whose tile sits entirely inside the sponge layer have nothing worth
-    saving. They get has_data=False and write no vz dataset at all.
+    Ranks fully inside the sponge get has_data=False and write no vz.
     """
     has_data: bool
-    tile_rows: slice          # source, into the halo-inclusive wavefield
+    tile_rows: slice          # source, in the wavefield with halo
     tile_columns: slice
     model_row_start: int      # destination, in unpadded model coordinates
     model_row_stop: int
@@ -655,7 +607,7 @@ def compute_output_window(domain, model_rows, model_columns, sponge_width):
     if saved_row_start >= saved_row_stop or saved_column_start >= saved_column_stop:
         return EMPTY_OUTPUT_WINDOW
 
-    # The +1 converts a tile-local index into a halo-inclusive one.
+    # +1 skips the halo cell.
     return OutputWindow(
         has_data=True,
         tile_rows=slice(
@@ -683,7 +635,7 @@ FLOAT32_ARRAY_2D = np.ctypeslib.ndpointer(
 
 
 class ElasticKernels:
-    """ctypes binding for the OpenMP kernels in elastic_kernels.c."""
+    """ctypes wrapper for the OpenMP kernels in elastic_kernels_v2_simd.c."""
 
     def __init__(self, library_path):
         if not os.path.exists(library_path):
@@ -733,7 +685,7 @@ class ElasticKernels:
 
 @dataclass
 class Wavefields:
-    """Velocity and stress components, each carrying a one-cell halo ring."""
+    """Velocity and stress arrays, each with a one-cell halo."""
     velocity_x: np.ndarray
     velocity_z: np.ndarray
     stress_xx: np.ndarray
@@ -756,12 +708,11 @@ class Wavefields:
 @dataclass
 class RickerSource:
     """
-    A Ricker wavelet injected into a single cell of the padded grid.
+    Ricker wavelet added to one cell of the padded grid.
 
-    The float32 rounding is deliberate. On the wavelet's leading tail the
-    amplitude is exp(-a) for large a, so it is exponentially sensitive to t,
-    and the scheme amplifies any perturbation. float64 gives an equally valid
-    answer, but not the same one.
+    Values are rounded to float32 on purpose. The wavelet's early tail is very
+    sensitive to t, and the scheme amplifies small differences. float64 is
+    just as correct but gives different output.
     """
     row: int
     column: int
@@ -772,8 +723,7 @@ class RickerSource:
     def __post_init__(self):
         self.peak_frequency = np.float32(self.peak_frequency)
         self.amplitude = np.float32(self.amplitude)
-        # Push the wavelet peak far enough past t=0 that the run starts from
-        # something close to silence.
+        # Delay the peak so the run starts near zero.
         self.delay = np.float32(1.2 / self.peak_frequency)
 
     def value_at(self, time):
@@ -781,9 +731,8 @@ class RickerSource:
             np.pi * float(self.peak_frequency) * (float(time) - float(self.delay))
         ) ** 2
         wavelet = (1.0 - 2.0 * exponent) * np.exp(-exponent)
-        # Scale as a separate multiply. Folding the amplitude into the line
-        # above changes the rounding by one ulp, which is enough to break the
-        # bit-for-bit comparison described in the class docstring.
+        # Keep this multiply separate. Merging it changes rounding by one ulp
+        # and breaks bit-for-bit matching with earlier runs.
         return np.float32(self.amplitude * wavelet)
 
     def lives_on(self, domain):
@@ -800,7 +749,7 @@ class RickerSource:
 
 
 class ElasticSimulation:
-    """Advances the wavefields one time step at a time."""
+    """Advances the wavefields one step at a time."""
 
     def __init__(
         self, kernels, halo, domain, wavefields, local_material,
@@ -850,11 +799,10 @@ class ElasticSimulation:
 
     def warm_up(self):
         """
-        Run one throwaway step and then wipe the fields.
+        Run one step and then zero the fields.
 
-        The first call pays for lazy symbol resolution, OpenMP thread pool
-        setup and page faults. Doing that before the timed loop keeps step zero
-        from dominating every profile.
+        The first kernel call pays for symbol lookup, OpenMP thread startup
+        and page faults. Doing it here keeps that cost out of the timed loop.
         """
         with scorep_region("warmup_kernels"):
             self._update_stress()
@@ -893,8 +841,8 @@ class ElasticSimulation:
 # HDF5 output
 # ---------------------------------------------------------------------------
 
-# Aligning objects and reserving a decent metadata block keeps HDF5 from
-# scattering small writes across a parallel filesystem.
+# Aligned objects and a large metadata block avoid many small writes on a
+# parallel filesystem.
 HDF5_FILE_OPTIONS = dict(
     libver="latest",
     alignment_threshold=4 * 1024 ** 2,
@@ -907,11 +855,10 @@ def dataset_filter_options(
     compression, compression_level, frame_shape, target_chunk_megabytes,
 ):
     """
-    Build the create_dataset keywords for the chosen compression filter.
+    Return create_dataset arguments for the chosen compression.
 
-    Compressed datasets must be chunked. One frame per chunk matches how frames
-    are written, but for a big tile that chunk gets unwieldy, so both
-    dimensions shrink by the same factor until it fits the target.
+    Compressed datasets need chunks. A chunk is one frame, shrunk evenly in
+    both directions if it is larger than the target size.
     """
     if compression == "none":
         return {}
@@ -938,8 +885,7 @@ def dataset_filter_options(
             shuffle=True,
         )
 
-    # Imported here so a run without compression never needs hdf5plugin
-    # installed at all.
+    # Imported here so uncompressed runs don't need hdf5plugin.
     import hdf5plugin
 
     if compression == "blosc":
@@ -954,11 +900,10 @@ def dataset_filter_options(
 
 class BatchedFrameWriter:
     """
-    Collects frames in memory and writes them in contiguous groups.
+    Buffers frames in memory and writes them in groups.
 
-    Fewer large writes beat many small ones on a parallel filesystem. The price
-    is holding frames_per_flush frames in RAM, which for a big tile is not
-    nothing.
+    Fewer, larger writes are faster on a parallel filesystem. The cost is
+    frames_per_flush frames of RAM.
     """
 
     def __init__(self, dataset, frame_shape, frames_per_flush):
@@ -997,7 +942,7 @@ class BatchedFrameWriter:
 
 
 class DirectFrameWriter:
-    """One dataset write per frame. Simplest, and uses the least memory."""
+    """Writes each frame as it arrives. Uses the least memory."""
 
     def __init__(self, dataset):
         self.dataset = dataset
@@ -1012,12 +957,11 @@ class DirectFrameWriter:
 
 class AsyncFrameWriter:
     """
-    Hands frames to a background thread so the time loop never waits on I/O.
+    Writes frames from a background thread so the time loop doesn't wait.
 
-    The thread pins itself to the rank's last core and owns the HDF5 file while
-    it runs, so the main thread must not touch that file until close() returns.
-    A fixed buffer pool provides back pressure: if I/O falls behind, the main
-    thread blocks instead of growing a queue without bound.
+    The thread runs on the rank's last core and owns the HDF5 file until
+    close() returns. A fixed pool of buffers makes the main thread wait if
+    writing falls behind, so memory use stays bounded.
     """
 
     def __init__(self, dataset, frame_shape, buffer_count):
@@ -1056,9 +1000,8 @@ class AsyncFrameWriter:
                     self.free_buffers.put(buffer)
         except BaseException as error:
             self.failure = error
-            # Unblock a main thread that is already waiting on a buffer. The
-            # array is a placeholder; the raise below happens before anything
-            # reads it.
+            # Wake the main thread if it is waiting for a buffer. It raises
+            # before using this placeholder.
             try:
                 self.free_buffers.put_nowait(np.empty(1, dtype=np.float32))
             except queue.Full:
@@ -1069,9 +1012,8 @@ class AsyncFrameWriter:
             raise RuntimeError("async HDF5 writer thread died") from self.failure
 
     def write(self, frame_index, frame):
-        # Waiting with a timeout rather than blocking forever means a writer
-        # thread that dies mid-wait still gets noticed instead of hanging the
-        # whole job until the wall clock runs out.
+        # Poll with a timeout so a dead writer thread raises an error
+        # instead of hanging the job.
         while True:
             self._raise_if_failed()
             try:
@@ -1091,7 +1033,7 @@ class AsyncFrameWriter:
 
 
 class DiscardingFrameWriter:
-    """For ranks whose tile lies entirely inside the sponge layer."""
+    """For ranks whose tile is entirely in the sponge."""
 
     def write(self, frame_index, frame):
         pass
@@ -1102,11 +1044,10 @@ class DiscardingFrameWriter:
 
 class RankOutputFile:
     """
-    This rank's HDF5 file: dataset layout, write strategy, and staging.
+    This rank's HDF5 file, its datasets and how frames get written.
 
-    With STAGE_ON_LOCAL_DISK the file is built on node-local disk and copied to its
-    final home on close, which keeps the shared filesystem out of the time loop
-    completely.
+    With STAGE_ON_LOCAL_DISK, the file is written on local disk and copied to
+    the output directory on close.
     """
 
     def __init__(
@@ -1188,7 +1129,7 @@ class RankOutputFile:
                 vz_dataset, frame_shape, IO_BUFFER_COUNT,
             )
 
-        # Never buffer more frames than the run will produce.
+        # Don't buffer more frames than the run produces.
         return BatchedFrameWriter(
             vz_dataset,
             frame_shape,
@@ -1197,8 +1138,7 @@ class RankOutputFile:
 
     def _write_attributes(self, attributes):
         window = self.window
-        # These key names are terse because combine_hdf5.py and make_video.py
-        # read them. Renaming them here breaks post-processing.
+        # combine_hdf5.py and make_video.py read these key names. Don't rename.
         placement = {
             "rank": self.domain.rank,
             "coord_z": self.domain.grid_row,
@@ -1228,11 +1168,10 @@ class RankOutputFile:
 
     def _copy_to_final_location(self):
         """
-        Move the staged file to where the virtual dataset expects it.
+        Copy the staged file to its final path.
 
-        The copy lands on a temporary name and is renamed, so a reader never
-        finds a half-written file. Each rank removes only its own staging
-        directory; racing to delete the shared parent invites mystery failures.
+        Copy to a temporary name, then rename, so readers never see a partial
+        file. Each rank deletes only its own staging directory.
         """
         os.makedirs(os.path.dirname(self.final_path), exist_ok=True)
         temporary_path = f"{self.final_path}.partial"
@@ -1244,7 +1183,7 @@ class RankOutputFile:
         shutil.rmtree(os.path.dirname(self.write_path), ignore_errors=True)
 
     def placement(self):
-        """What rank 0 needs to slot this rank's tile into the virtual dataset."""
+        """Info rank 0 needs to place this tile in the virtual dataset."""
         return {
             "has_data": self.window.has_data,
             "row_start": int(self.window.model_row_start),
@@ -1261,11 +1200,10 @@ def write_virtual_dataset(
     path, placements, p_velocity, frame_times, frame_count, attributes,
 ):
     """
-    Stitch the per-rank files into something that reads like one array.
+    Join the per-rank files into one virtual dataset.
 
-    Nothing is copied. The virtual dataset is a set of pointers into the rank
-    files, and the paths are relative, so the whole output directory can be
-    moved or renamed without breaking it.
+    No data is copied. Paths are relative, so the output directory can be
+    moved or renamed.
     """
     model_rows, model_columns = p_velocity.shape
 
@@ -1295,8 +1233,8 @@ def write_virtual_dataset(
                     placement["column_start"]:placement["column_stop"],
                 ] = source
 
-            # fillvalue covers any gap, which should not exist, but a run with a
-            # bug in the decomposition then shows up as zeros rather than junk.
+            # Gaps shouldn't exist. If a decomposition bug leaves one, it
+            # reads as zeros.
             virtual_file.create_virtual_dataset("vz", layout, fillvalue=0.0)
             virtual_file.create_dataset(
                 "vp", data=p_velocity.astype(np.float32), track_times=False,
@@ -1315,10 +1253,9 @@ def write_virtual_dataset(
 
 def check_inputs(comm, arguments):
     """
-    Confirm every file the run needs exists, before anyone opens one.
+    Check on rank 0 that all input files exist, and name any missing one.
 
-    segyio's FileNotFoundError does not name the file it wanted, so all ranks
-    print a traceback saying nothing useful. Check on rank 0 and name the path.
+    segyio's error doesn't say which file is missing.
     """
     problem = None
 
@@ -1352,12 +1289,10 @@ def check_inputs(comm, arguments):
 
 def prepare_output_directory(comm, path):
     """
-    Create the output directory and prove it is writable, on rank 0 only.
+    Create the output directory on rank 0 and check it is writable.
 
-    A typo in a scratch path is easy to make, and checking now turns a crash
-    deep inside HDF5 into one line at the start. The verdict is broadcast so
-    every rank fails together; rank 0 raising alone would leave the others at
-    the barrier until the wall clock ran out.
+    The result goes to all ranks so they exit together. If only rank 0
+    exited, the rest would wait at the barrier until the job timed out.
     """
     problem = None
 
@@ -1381,11 +1316,10 @@ def report_performance(
     seconds_in_loop, seconds_writing_frames, seconds_closing,
 ):
     """
-    Print how long the time loop took, and drop a one-row CSV next to the data.
+    Print loop timings and write a one-row timing.csv to the output directory.
 
-    Timings reduce with max, not mean: a step is not done until the slowest
-    rank has finished it, and averaging would flatter a badly balanced run. The
-    CSV lets a sweep be collected without scraping stdout.
+    Timings use the slowest rank, since a step ends when the slowest rank
+    finishes it.
     """
     cells_this_rank = (
         (kernel_bounds.row_end - kernel_bounds.row_begin)
@@ -1401,8 +1335,7 @@ def report_performance(
         return
 
     steps_per_second = arguments.time_steps / slowest_loop
-    # One lattice update is one cell carried through one whole time step, which
-    # here means both the stress and the velocity kernel.
+    # One lattice update is one cell through one full step (stress and velocity).
     lattice_updates = total_cells * arguments.time_steps / slowest_loop
 
     print(
@@ -1456,8 +1389,8 @@ def main(argv=None):
 
     prepare_output_directory(comm, arguments.output_directory)
 
-    # Every rank reads the models itself. They are tiny next to the simulation
-    # grid, and this beats scattering the full model over MPI.
+    # Each rank reads the models itself. They are small, so this is cheaper
+    # than scattering them over MPI.
     with scorep_region("load_segy_inputs"):
         p_velocity = load_segy_model(arguments.vp_path, arguments.downsample)
         s_velocity = load_segy_model(arguments.vs_path, arguments.downsample)
@@ -1471,7 +1404,7 @@ def main(argv=None):
             p_velocity, s_velocity, density, SPONGE_WIDTH,
         )
 
-    # The fastest material anywhere on the grid sets the stable time step.
+    # The highest velocity sets the stable time step.
     fastest_velocity = float(material.p_velocity.max())
     time_step = np.float32(
         COURANT_NUMBER * float(cell_size) / fastest_velocity,
@@ -1508,7 +1441,7 @@ def main(argv=None):
     source_row = material.sponge_width + 1
     source_column = material.sponge_width + model_columns // 2
 
-    # Short keys again, for the benefit of the post-processing scripts.
+    # Short key names, read by the post-processing scripts.
     shared_attributes = {
         "size": rank_count,
         "dims_z": domain.rank_grid_rows,
@@ -1605,8 +1538,7 @@ def main(argv=None):
         seconds_in_loop, seconds_writing_frames, seconds_closing,
     )
 
-    # Staged files have to be in place before rank 0 writes a virtual dataset
-    # pointing at them, hence the barrier.
+    # Staged files must be in place before rank 0 builds the virtual dataset.
     with scorep_region("gather_vds_metadata"):
         placements = comm.gather(output_file.placement(), root=0)
     comm.Barrier()

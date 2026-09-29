@@ -1,22 +1,24 @@
 #!/bin/bash
 #
-# Run the tiled kernel (src/elastic_tiled.py), optionally under Score-P.
+# Run the tiled kernel (src/elastic_tiled.py), with or without Score-P.
 #
-#   sbatch --export=ALL,FWMP_BUILD=1 fwmp_tiled.sbatch       compile, then exit
+#   sbatch --export=ALL,FWMP_BUILD=1 fwmp_tiled.sbatch       build, then exit
 #   sbatch fwmp_tiled.sbatch                                 run
 #   sbatch --export=ALL,FWMP_SCOREP=1 fwmp_tiled.sbatch      run under Score-P
+#   sbatch --export=ALL,FWMP_COMPRESSION=gzip fwmp_tiled.sbatch   gzip run
 #
-# This is deliberately separate from fwmp.sbatch. The tiled kernel is not a
-# fifth optimisation level of the same code: it exports three fused entry
-# points instead of two and overlaps the halo exchange with computation, so it
-# needs its own driver, which is src/elastic_tiled.py.
+# This is separate from fwmp.sbatch on purpose. The tiled kernel has three
+# functions instead of two and overlaps the halo exchange with compute, so it
+# needs its own driver, src/elastic_tiled.py.
 #
 # Environment variables:
-#   FWMP_BUILD=1    compile the tiled kernels and exit
+#   FWMP_BUILD=1    build the tiled kernel and exit
 #   FWMP_SCOREP=1   build with scorep-gcc, run under Score-P
 #   FWMP_TILE_ROWS  tile height in rows, default 64
 #   FWMP_NITER      steps, default 500 under Score-P, 50000 otherwise
 #   FWMP_MARCH      compiler target, default native
+#   FWMP_COMPRESSION  vz compression, default blosc (none|gzip|blosc|lz4)
+#   FWMP_COMPRESSION_LEVEL  compression level, default 4 for gzip, 3 otherwise
 
 #SBATCH --partition=scc-cpu
 #SBATCH --nodes=1
@@ -55,9 +57,9 @@ fi
 # Building
 # ---------------------------------------------------------------------------
 
-# Instrumented and plain builds get separate names, so both can sit there and
-# switching between them needs no rebuild. elastic_tiled.py picks one with
-# FWMP_KERNEL_LIB, which needs the one-line change described in the README.
+# Score-P and plain builds have different names, so both can exist and
+# switching needs no rebuild. elastic_tiled.py loads the one named in
+# FWMP_KERNEL_LIB.
 if [ "$USE_SCOREP" != "0" ]; then
     KERNEL_SUFFIX="_scorep"
 else
@@ -117,13 +119,16 @@ export FWMP_DS="${FWMP_DS:-1}"
 export FWMP_DIRECT_VZ_SOURCE="${FWMP_DIRECT_VZ_SOURCE:-0}"
 export FWMP_KERNEL_LIB="$TILED_LIBRARY"
 
-# Tile height. Unset, the C picks 4 * OMP_NUM_THREADS clamped to 16..256, so it
-# would change with every thread count and you could not tell tiling effects
-# apart from thread scaling. Pin it for a sweep.
+# Tile height. If unset, the kernel uses 4 * OMP_NUM_THREADS, clamped to
+# 16-256, so it changes with the thread count. Fix it for sweeps so tiling
+# and thread scaling don't mix.
 export FWMP_TILE_ROWS="${FWMP_TILE_ROWS:-64}"
 
-# Instrumented runs emit a lot of region events per step, so keep them short by
-# default. An uninstrumented run gets the production step count.
+# vz compression. Earlier tiled runs all used blosc. gzip writes slower, but
+# plain HDF5 tools can open it without hdf5plugin.
+export FWMP_COMPRESSION="${FWMP_COMPRESSION:-blosc}"
+
+# Score-P records many events per step, so its runs default to fewer steps.
 if [ "$USE_SCOREP" != "0" ]; then
     export FWMP_NITER="${FWMP_NITER:-500}"
     export FWMP_FRAME_STRIDE="${FWMP_FRAME_STRIDE:-500}"
@@ -157,6 +162,7 @@ echo "job        $JOB_ID"
 echo "layout     ${NODES}n x ${TASKS_PER_NODE}r x ${OMP_NUM_THREADS}t"
 echo "kernel     $TILED_LIBRARY"
 echo "tile rows  $FWMP_TILE_ROWS"
+echo "compress   $FWMP_COMPRESSION"
 echo "niter      $FWMP_NITER (stride $FWMP_FRAME_STRIDE)"
 echo "scorep     $USE_SCOREP"
 echo "work       $WORK_DIR"
@@ -165,9 +171,9 @@ echo "----------------------------------------"
 
 cd "$SRC_DIR"
 
-# Wall clock around srun. elastic_tiled.py does not report its own timings, so
-# this is the whole job including startup and I/O, NOT the time loop. Do not
-# compare it against loop_seconds from fwmp.py.
+# Wall time around srun. elastic_tiled.py doesn't time itself, so this covers
+# the whole job, including startup and I/O. Don't compare it with
+# loop_seconds from fwmp.py.
 START=$(date +%s.%N)
 srun --distribution=block:block --cpu-bind=cores "${LAUNCH[@]}"
 END=$(date +%s.%N)

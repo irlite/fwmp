@@ -6,35 +6,27 @@
 #   ./submit_sweep_tiled.sh --dry-run    print what would be submitted
 #   ./submit_sweep_tiled.sh --collect DIR
 #
-# FWMP_SCOREP=1 runs the sweep instrumented.
-# FWMP_TILE_ROWS pins the tile height; one sweep uses one value.
+# FWMP_SCOREP=1 runs the sweep under Score-P.
+# FWMP_TILE_ROWS sets the tile height. Each sweep uses one value.
 #
-# Each configuration is NODES TASKS_PER_NODE CPUS_PER_TASK, and every job runs
-# the same problem for the same number of steps, so the only thing changing is
-# how the work is divided.
+# Each config is NODES TASKS_PER_NODE CPUS_PER_TASK. Every job runs the same
+# problem for the same number of steps. Only the work split changes.
 
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_ROOT"
 
-# What every job in the sweep runs. Keep --niter high enough that startup does
-# not dominate, and --frame-stride high so the timing measures compute rather
-# than I/O.
-# elastic_tiled.py is env-driven, not argparse, so these go through --export.
-# One frame keeps I/O out of the measurement.
-SWEEP_NITER="${FWMP_NITER:-5000}"
-SWEEP_FRAME_STRIDE="${FWMP_FRAME_STRIDE:-5000}"
 
-# Cores per node, used to reject configurations that cannot be scheduled.
-# Detected from the partition if sinfo can tell us, override if it guesses
-# wrong.
+SWEEP_NITER="${FWMP_NITER:-50000}"
+SWEEP_FRAME_STRIDE="${FWMP_FRAME_STRIDE:-100}"
+
+
 PARTITION="${FWMP_PARTITION:-scc-cpu}"
 CORES_PER_NODE="${FWMP_CORES_PER_NODE:-0}"
 
 CONFIGS=(
-    # Fixed 64 cores on one node: where is the best split between ranks and
-    # threads? This is the most useful group, and usually the most surprising.
+
     "1  1 64"
     "1  2 32"
     "1  4 16"
@@ -43,7 +35,6 @@ CONFIGS=(
     "1 32  2"
     "1 64  1"
 
-    # One rank, growing threads: pure OpenMP scaling, no MPI in the picture.
     "1  1  1"
     "1  1  2"
     "1  1  4"
@@ -51,21 +42,18 @@ CONFIGS=(
     "1  1 16"
     "1  1 32"
 
-    # One thread per rank, growing ranks: pure MPI scaling on one node.
     "1  2  1"
     "1  4  1"
     "1  8  1"
     "1 16  1"
     "1 32  1"
 
-    # Across nodes at 2 ranks x 8 threads each: does it keep scaling once the
-    # halo exchange has to cross the network?
+
     "1  2  8"
     "2  2  8"
     "4  2  8"
     "8  2  8"
 
-    # Half-loaded node, from your original list.
     "1  4  8"
 )
 
@@ -79,8 +67,7 @@ if [ "${1:-}" = "--collect" ]; then
         echo "usage: $0 --collect <sweep directory>" >&2
         exit 1
     fi
-    # Strip every trailing slash, so labels and the results path stay clean
-    # when the directory is tab-completed.
+
     while [ "${SWEEP_DIR%/}" != "$SWEEP_DIR" ]; do
         SWEEP_DIR="${SWEEP_DIR%/}"
     done
@@ -88,9 +75,7 @@ if [ "${1:-}" = "--collect" ]; then
     RESULTS="$SWEEP_DIR/results.csv"
     : > "$RESULTS"
 
-    # Find results at any depth, so this works whether you point it at one
-    # sweep or at the parent holding several. The label is the path relative to
-    # wherever you pointed it, which keeps rows from different sweeps apart.
+   
     found=0
     while IFS= read -r TIMING; do
         LABEL="${TIMING#"$SWEEP_DIR"/}"
@@ -103,8 +88,8 @@ if [ "${1:-}" = "--collect" ]; then
         found=$((found + 1))
     done < <(find "$SWEEP_DIR" -type f -name timing.csv | sort)
 
-    # A run directory is named like its configuration. One without a
-    # timing.csv is still queued, or it failed.
+    # Run folders are named after their config. One with no timing.csv is
+    # still queued, or it failed.
     missing=0
     while IFS= read -r RUN_DIR; do
         [ -f "$RUN_DIR/timing.csv" ] && continue
@@ -135,7 +120,7 @@ if [ -n "$DRY_RUN" ] && [ "$DRY_RUN" != "--dry-run" ]; then
     exit 1
 fi
 
-# Read DEFAULT_WORK_DIR out of fwmp_tiled.sbatch so there is one place to set it.
+# Read DEFAULT_WORK_DIR from fwmp_tiled.sbatch, so it's set in one place.
 DEFAULT_WORK_DIR="$(sed -n 's/^DEFAULT_WORK_DIR="\(.*\)"$/\1/p' fwmp_tiled.sbatch | head -1)"
 USE_SCOREP="${FWMP_SCOREP:-0}"
 TILE_ROWS="${FWMP_TILE_ROWS:-64}"
@@ -144,7 +129,7 @@ WORK_DIR="${FWMP_WORK_DIR:-${DEFAULT_WORK_DIR:-$PROJECT_ROOT}}"
 SWEEP_ID="$(date +%Y%m%d_%H%M%S)_tiled${TILE_ROWS}"
 SWEEP_DIR="$WORK_DIR/sweeps_tiled/sweep_$SWEEP_ID"
 
-# Ask SLURM how big a node is, rather than hardcoding it.
+# Ask SLURM how many cores a node has.
 if [ "$CORES_PER_NODE" -eq 0 ]; then
     CORES_PER_NODE="$(sinfo -h -p "$PARTITION" -o "%c" 2>/dev/null | sort -rn | head -1 || true)"
     CORES_PER_NODE="${CORES_PER_NODE:-0}"
@@ -170,8 +155,7 @@ if [ "$USE_SCOREP" != "0" ]; then
     echo
 fi
 
-# Every job needs the kernel already built. Check once here rather than
-# submitting two dozen jobs that each fail the same way.
+
 if [ "$USE_SCOREP" != "0" ]; then
     NEEDED_KERNEL="src/libelastic_kernels_tiled_scorep.so"
     BUILD_HINT="sbatch --export=ALL,FWMP_BUILD=1,FWMP_SCOREP=1 fwmp_tiled.sbatch"
@@ -197,8 +181,8 @@ for CONFIG in "${CONFIGS[@]}"; do
 
     LABEL="${NODES}x${TASKS_PER_NODE}x${CPUS_PER_TASK}"
 
-    # The same config listed twice would submit two jobs writing to one
-    # directory, and the second would overwrite the first.
+    # A duplicate config would send two jobs to one folder, and the second
+    # would overwrite the first.
     case " $seen_labels " in
         *" $LABEL "*)
             echo "skip $LABEL: duplicate entry in CONFIGS"

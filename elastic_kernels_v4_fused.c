@@ -1,30 +1,25 @@
 /*
- * Level 4 of 4: squeeze the loads, and find out whether it was worth it.
+ * Level 4 of 4: fewer loads, and a check on whether that helps.
  *
- * Two micro-optimisations on top of level 3.
+ * Two small changes on top of level 3.
  *
- * Row-pair fusion. In update_stress, row i reads row i+1, and row i+1 reads
- * row i+2. Process the rows two at a time and the shared middle row is loaded
- * once instead of twice: three row loads of vx and vz per pair rather than
- * four. update_velocity has the same overlap one row up.
+ * Row pairs. In update_stress, row i reads row i+1, and row i+1 reads row i+2.
+ * Doing two rows at once loads the shared middle row once, so three row loads
+ * of vx and vz per pair instead of four. update_velocity has the same overlap
+ * one row up.
  *
- * Software prefetch. The hardware prefetcher follows a sequential walk along a
- * row without help. What it handles less well is the jump to the next row,
- * which in a tiled loop is a stride of nx floats to an address the walk has
- * not touched. So issue a prefetch for the next pair's rows while the current
- * pair is being computed.
+ * Software prefetch. The hardware prefetcher follows a walk along a row on its
+ * own. It does worse on the jump to the next row, which in a tiled loop is nx
+ * floats away. So prefetch the next pair's rows while computing this pair.
  *
- * Be sceptical of this level. It is where you stop removing obvious waste and
- * start fighting for single-digit percentages, and both changes can backfire:
- * the fused body needs more live registers and may spill, and prefetch
- * instructions cost issue slots whether or not they help. On a memory-bound
- * kernel already running at bandwidth, neither can do anything at all. The
- * honest outcome of this level might be "no faster than level 3, and harder to
- * read", which is a perfectly good result to report as long as you measured it
- * rather than assumed it.
+ * Measure this level before trusting it. The gains here are a few percent at
+ * best, and both changes can make things slower. The paired loop uses more
+ * registers and may spill. Prefetch instructions cost time whether or not they
+ * help. If the kernel is already limited by memory bandwidth, neither change
+ * does anything. "No faster than level 3" is a valid result, as long as it
+ * was measured.
  *
- * Arithmetic is unchanged, so the output is still bit-for-bit identical to
- * every other level.
+ * The arithmetic is the same, so output matches every other level bit for bit.
  *
  * Build:
  *   gcc -O3 -fopenmp -march=native -fPIC -shared \
@@ -136,7 +131,7 @@ void update_stress(
                 }
             }
 
-            /* Odd tile height leaves one row over. */
+            /* If the tile height is odd, one row is left. */
             for (; i < i_end; ++i) {
                 const int row = i * nx;
                 const int row_below = (i + 1) * nx;

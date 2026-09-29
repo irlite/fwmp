@@ -1,32 +1,29 @@
 /*
  * Level 3 of 4: tile for cache.
  *
- * Level 2 walks a whole row at a time. Row i reads the row below it, and one
- * iteration later that row becomes row i. If a row fits in cache, the second
- * read is free. If it does not, every row gets fetched from memory twice and
- * the kernel runs at memory bandwidth for no good reason.
+ * Level 2 works one full row at a time. Row i reads row i+1, and on the next
+ * iteration row i+1 is the current row. If a row fits in cache, the second
+ * read is cheap. If not, every row comes from memory twice.
  *
- * Whether that happens depends on nx, which is the model width plus twice the
- * sponge. At nx = 560 a row is 2.2 kB and there is nothing to fix. At nx =
- * 40000 it is 160 kB, times the nine arrays this kernel touches, and the reuse
- * is gone.
+ * That depends on nx, the model width plus twice the sponge. At nx = 560 a row
+ * is 2.2 kB and there is no problem. At nx = 40000 a row is 160 kB, times the
+ * nine arrays this kernel reads, and the reuse is lost.
  *
- * So: split the grid into BLOCK_ROWS x BLOCK_COLUMNS tiles and hand out tiles
- * instead of rows. Each thread then works inside a window whose three-row
- * footprint fits L1 no matter how wide the grid is. collapse(2) flattens the
- * two tile loops so there are enough chunks to keep every thread busy.
+ * So split the grid into BLOCK_ROWS x BLOCK_COLUMNS tiles and give threads
+ * tiles instead of rows. Three rows of a tile then fit in L1 at any grid
+ * width. collapse(2) merges the two tile loops so every thread gets work.
  *
- * Both kernels read one array and write another, with no cell depending on
- * another cell of the same array, so visiting cells in tile order instead of
- * row order computes exactly the same values.
+ * Each kernel reads one array and writes another, and no cell depends on
+ * another cell of the same array. So tile order gives the same values as row
+ * order.
  *
- * Tune the block sizes at build time:
+ * Set block sizes at build time:
  *   -DBLOCK_ROWS=32 -DBLOCK_COLUMNS=512
  *
- * 512 columns is 2 kB per array per row. With roughly eleven array-rows live
- * inside a tile that is about 22 kB, which fits a 32 kB L1. Widen it until it
- * stops helping. If your tile per rank is small, watch out for the other
- * failure mode: too few tiles to feed the threads, and level 2 wins.
+ * 512 columns is 2 kB per array per row. About eleven array rows are in use
+ * inside a tile, so about 22 kB, which fits a 32 kB L1. Try wider until it
+ * stops helping. If each rank's tile is small, there may be too few tiles to
+ * keep every thread busy, and level 2 will be faster.
  *
  * Build:
  *   gcc -O3 -fopenmp -march=native -fPIC -shared \

@@ -1,148 +1,230 @@
 # fwmp
 
-2D elastic wave simulation, MPI-parallel, with the finite-difference kernels in C.
+A 2D elastic wave simulation. Python sets up the problem and splits it across MPI ranks. C kernels (OpenMP) do the math. Output is `vz` snapshots in HDF5.
 
-Two files do the work. `fwmp.py` is the simulation; `fwmp.sbatch` builds the
-kernels and submits it. The kernels come in four optimisation levels, described
-below.
+There are two versions of the code:
 
-## Layout on the cluster
+- **Main version.** `fwmp.py`, run with `fwmp.sbatch`. It has four kernel levels (v1 to v4) you can compare.
+- **Tiled version.** `src/elastic_tiled.py`, run with `fwmp_tiled.sbatch`. It uses one fused kernel and overlaps halo exchange with compute.
+
+## What's in the repo
 
 ```
 fwmp/
-├── fwmp.py                 the simulation
-├── fwmp.sbatch             SLURM job script
-├── elastic_kernels_v1_naive.c     OpenMP kernels, four levels,
-├── elastic_kernels_v2_simd.c      all compiled by the job script
-├── elastic_kernels_v3_blocked.c
-├── elastic_kernels_v4_fused.c
-└── data/                   the three SEG-Y models
+├── fwmp.py                        main simulation
+├── fwmp.sbatch                    SLURM script for fwmp.py
+├── elastic_kernels_v1_naive.c     kernel level 1
+├── elastic_kernels_v2_simd.c      kernel level 2 (default)
+├── elastic_kernels_v3_blocked.c   kernel level 3
+├── elastic_kernels_v4_fused.c     kernel level 4
+├── submit_sweep.sh                scaling sweep for fwmp.py
+├── fwmp_tiled.sbatch              SLURM script for the tiled version
+├── submit_sweep_tiled.sh          scaling sweep for the tiled version
+├── src/
+│   ├── elastic_tiled.py           tiled simulation
+│   └── elastic_kernels_tiled.c    tiled kernel
+└── data/
+    ├── MODEL_P-WAVE_VELOCITY_1.25m.segy
+    ├── MODEL_S-WAVE_VELOCITY_1.25m.segy
+    └── MODEL_DENSITY_1.25m.segy
 ```
 
-`fwmp.py` also works from a `src/` subdirectory with `data/` as a sibling; it
-checks both places. Anywhere else, pass `--data-dir`.
+## What you need
 
-Output does not go here by default on a real run. See below.
+- A SLURM cluster with these modules: `gcc`, `openmpi`, `python`
+- `scorep` module, only if you want profiling
+- The three SEG-Y model files above
 
-## First time
+Python packages (the setup step installs them): `numpy`, `h5py`, `segyio`, `hdf5plugin`, `mpi4py`.
+
+## Setup (do this once)
+
+### 1. Get the code and data
 
 ```bash
 git clone <your-repo> fwmp
 cd fwmp
+mkdir -p data
+# copy the three .segy files into data/
+```
+
+### 2. Set your output folder
+
+Both `fwmp.sbatch` and `fwmp_tiled.sbatch` have this line near the top:
+
+```bash
+DEFAULT_WORK_DIR="/user/utkarsh.pathak/..."
+```
+
+It points at another user's folder. Change it to your own scratch space, for example:
+
+```bash
+DEFAULT_WORK_DIR="/scratch/$USER/fwmp"
+```
+
+Set it to `""` to write output next to the code instead. Don't do that for long runs. A full run writes tens of GB and will fill a home directory.
+
+You can also leave the file alone and set `FWMP_WORK_DIR` each time you submit.
+
+### 3. Check the partition
+
+Both sbatch scripts use `#SBATCH --partition=scc-cpu`. If your cluster uses a different name, change it. The sweep scripts read `FWMP_PARTITION` (default `scc-cpu`).
+
+### 4. Build everything with a short test run
+
+```bash
 FWMP_SETUP=1 sbatch fwmp.sbatch --niter 200 --frame-stride 50
 ```
 
-`FWMP_SETUP=1` creates `.venv` and installs the dependencies, then imports
-mpi4py to prove it works before any job depends on it.
+This one job:
 
-mpi4py needs care, and is the usual reason a first run fails. Recent pip wheels
-are prebuilt against a generic ABI and `dlopen` `libmpi.so` when imported, which
-dies if your cluster's MPI is not on the loader path:
+1. Creates `.venv` and installs the Python packages
+2. Builds `mpi4py` against the cluster's MPI, if it doesn't already work
+3. Compiles all four kernels into `libelastic_kernels_v1.so` to `v4.so`
+4. Runs 200 steps as a test
 
-```
-RuntimeError: cannot load MPI library
-libmpi.so.40: cannot open shared object file: No such file or directory
-```
+Check `fwmp_<jobid>.out`. It should end with `done: .../elastic_wavefield.h5`.
 
-The setup step avoids this by keeping a working system mpi4py if there is one,
-and otherwise compiling from source against the module's `mpicc`. To repair a
-venv that already has a bad wheel in it:
+## Running the main version
+
+Everything after `fwmp.sbatch` goes to `fwmp.py`. SLURM options go before it.
 
 ```bash
-module purge && module load gcc openmpi python
-source .venv/bin/activate
-pip uninstall -y mpi4py
-MPICC=$(which mpicc) pip install --no-binary=mpi4py --no-cache-dir mpi4py
-python -c "from mpi4py import MPI; print(MPI.Get_library_version().splitlines()[0])"
-```
-
-If `which mpicc` is empty, the MPI module is not providing a compiler wrapper
-and that is the actual problem. `module list`, `mpicc -show` and
-`echo $LD_LIBRARY_PATH | tr : '\n' | grep -i mpi` will show what you have.
-
-That first submission also compiles all four kernel levels. Later jobs only
-recompile the ones whose C source you have edited.
-
-The short `--niter 200` is deliberate: check the output looks sane before
-queueing a real run.
-
-## Where output goes
-
-A long run writes tens of gigabytes of HDF5, which will blow through a home
-directory quota. Point `FWMP_WORK_DIR` at scratch:
-
-```bash
-FWMP_WORK_DIR=/scratch/$USER/fwmp sbatch fwmp.sbatch --niter 50000
-```
-
-Results then land in `/scratch/$USER/fwmp/output/job_<id>/`. The code, the venv
-and the compiled kernels stay where you cloned the repo; only output moves.
-Easiest is to export it in your shell profile so you cannot forget it.
-
-Running `fwmp.py` directly, the knob is `--output-dir`.
-
-Rank 0 creates the directory and writes a probe file before anything else
-starts, so a typo in the scratch path fails in the first second rather than
-after the models have loaded.
-
-The SEG-Y inputs are read from `data/` next to the script, or one level up if
-the script lives in `src/`. The file names are in the Settings block.
-
-## Normal runs
-
-```bash
+# default run: 50000 steps, v2 kernel
 sbatch fwmp.sbatch
-sbatch fwmp.sbatch --niter 50000 --frame-stride 100 --compression blosc
-sbatch -N 4 --ntasks-per-node=2 --cpus-per-task=8 fwmp.sbatch --stage-local
+
+# fewer steps, compressed output
+sbatch fwmp.sbatch --niter 2000 --compression blosc
+
+# more nodes
+sbatch -N 4 --ntasks-per-node=2 --cpus-per-task=8 fwmp.sbatch
+
+# a different kernel level
+FWMP_KERNEL=v3 sbatch fwmp.sbatch --niter 2000
 ```
 
-Everything after the script name is passed to `fwmp.py`. SLURM options go
-before it. Run `python fwmp.py --help` for the full list.
+Default job size: 1 node, 4 ranks, 8 threads per rank, 4 hours.
 
-The defaults in the `#SBATCH` header are 1 node, 4 ranks, 8 threads per rank,
-4 hours. Override any of them on the command line.
+### Command-line options
 
-## Kernel optimisation levels
+| Option | Default | What it does |
+|---|---|---|
+| `--niter` | 50000 | Number of time steps |
+| `--frame-stride` | 100 | Save a snapshot every N steps |
+| `--downsample` | 1 | Keep every Nth model sample. Use 4 or 8 for quick tests |
+| `--compression` | none | `none`, `gzip`, `blosc` or `lz4` |
+| `--output-dir` | set by sbatch | Where results go |
+| `--kernel-lib` | set by sbatch | Which compiled kernel to load |
 
-All four compute the same expressions in the same order, so they produce
-bit-for-bit identical output and do exactly the same number of flops. Only the
-loop structure and the compiler hints differ, which makes a timing comparison
-between them a fair one.
+Other settings (sponge width, source, write mode, local-disk staging) are constants at the top of `fwmp.py`. Edit them there.
 
-| Level | File | What changes |
-|-------|------|--------------|
-| v1 | `elastic_kernels_v1_naive.c` | `omp parallel for` on the outer loop, nothing else |
-| v2 | `elastic_kernels_v2_simd.c` | `restrict`, `omp simd`, hoisted row offsets, `schedule(static)` |
-| v3 | `elastic_kernels_v3_blocked.c` | v2 plus 2D cache tiling with `collapse(2)` |
-| v4 | `elastic_kernels_v4_fused.c` | v3 plus row-pair fusion and software prefetch |
+### Environment variables for fwmp.sbatch
 
-v2 is the default and the one the project has used all along. Pick another with
-`FWMP_KERNEL`:
+| Variable | What it does |
+|---|---|
+| `FWMP_SETUP=1` | Build `.venv` and kernels, then run |
+| `FWMP_BUILD=1` | Only compile the kernels, then exit |
+| `FWMP_KERNEL` | `v1`, `v2`, `v3` or `v4`. Default `v2` |
+| `FWMP_WORK_DIR` | Output folder, overrides `DEFAULT_WORK_DIR` |
+| `FWMP_BLOCK_ROWS`, `FWMP_BLOCK_COLUMNS` | Tile size for v3 and v4, applied at build time. Default 32 x 512 |
+| `FWMP_SCOREP=1` | Profile with Score-P |
+
+### After editing a kernel
+
+Jobs don't recompile on their own. Rebuild after any change to a `.c` file or the block size:
 
 ```bash
-FWMP_KERNEL=v1 sbatch fwmp.sbatch --niter 2000
-FWMP_KERNEL=v3 FWMP_BLOCK_COLUMNS=1024 sbatch fwmp.sbatch --niter 2000
+FWMP_BUILD=1 sbatch fwmp.sbatch
 ```
 
-The jump from v1 to v2 is the big one, and `restrict` does most of that work on
-its own. Without it the compiler has to assume `sxx` and `vx` might be the same
-memory, so it cannot keep values in registers across a store and will not
-vectorise at all.
+## Running the tiled version
 
-v3 and v4 might not beat v2 on your machine, and that is a real result rather
-than a failed experiment. v3 only pays off once a grid row stops fitting in
-cache, which depends on `nx`, which is the model width plus twice the sponge.
-v4 is micro-optimisation, and on a kernel already running at memory bandwidth
-it can do nothing at all. Measure before you believe either of them.
+The tiled version uses the same `.venv`, so do the setup step first.
 
-`FWMP_BLOCK_ROWS` and `FWMP_BLOCK_COLUMNS` set the tile shape for v3 and v4
-(default 32 x 512). Too small and you drown in loop overhead; too large and the
-tile stops fitting in cache. With few threads and a small tile per rank, watch
-for the other failure: not enough tiles to keep every thread busy.
+```bash
+# 1. compile the tiled kernel
+sbatch --export=ALL,FWMP_BUILD=1 fwmp_tiled.sbatch
 
-## Measuring
+# 2. run it
+sbatch fwmp_tiled.sbatch
+```
 
-Every run prints this when it finishes:
+It takes settings from environment variables, not flags:
+
+| Variable | Default | What it does |
+|---|---|---|
+| `FWMP_NITER` | 50000 | Number of time steps |
+| `FWMP_FRAME_STRIDE` | 100 | Save a snapshot every N steps |
+| `FWMP_TILE_ROWS` | 64 | Tile height in rows |
+| `FWMP_COMPRESSION` | blosc | `none`, `gzip`, `blosc` or `lz4` |
+| `FWMP_DS` | 1 | Downsample factor |
+
+Example:
+
+```bash
+sbatch --export=ALL,FWMP_NITER=2000,FWMP_TILE_ROWS=32 fwmp_tiled.sbatch
+```
+
+The job time limit is 15 minutes. Raise `#SBATCH --time` for long runs.
+
+The tiled version reports whole-job wall time only. Don't compare it with the loop time from `fwmp.py`.
+
+## Scaling sweeps
+
+A sweep submits one job per layout (nodes x ranks x threads) and collects the timings into one CSV. Build the kernels first.
+
+```bash
+chmod +x submit_sweep.sh submit_sweep_tiled.sh
+
+# main version, pick one kernel level per sweep
+./submit_sweep.sh v2 --dry-run     # show what would be submitted
+./submit_sweep.sh v2               # submit
+
+# tiled version
+./submit_sweep_tiled.sh --dry-run
+./submit_sweep_tiled.sh
+```
+
+The script prints the sweep folder. When the jobs finish:
+
+```bash
+./submit_sweep.sh --collect <sweep folder>
+```
+
+This writes `results.csv` in that folder. You can run it again while some jobs are still queued.
+
+Edit the `CONFIGS` list at the top of each script to change which layouts run. Each line is `NODES TASKS_PER_NODE CPUS_PER_TASK`. Layouts that need more cores than a node has are skipped. If core detection fails, set `FWMP_CORES_PER_NODE`.
+
+## Output
+
+```
+<work dir>/output/job_<id>/
+├── elastic_wavefield.h5      open this one
+├── timing.csv                timings for this run
+└── rank_0000/
+    └── elastic_wavefield.h5  one rank's piece
+```
+
+The top-level file links to the rank files. It holds no data itself. Keep the whole `job_<id>` folder together when you move it.
+
+Datasets:
+
+- `vz`, shape `(frames, rows, columns)`
+- `vp`, the P-wave model
+- `time`, the time of each frame
+
+Read it in Python:
+
+```python
+import hdf5plugin   # needed for compressed runs
+import h5py
+
+with h5py.File("output/job_12345/elastic_wavefield.h5") as f:
+    print(f["vz"].shape)
+    print(dict(f.attrs))
+```
+
+At the end of a run, `fwmp.py` prints something like this:
 
 ```
 time loop       0.58 s   (slowest rank)
@@ -151,125 +233,79 @@ time loop       0.58 s   (slowest rank)
 throughput     519.4 steps/s   156.5 MLUP/s
 ```
 
-Timings are reduced with max across ranks, not mean, because a step is not done
-until the slowest rank has finished it. One lattice update is one cell carried
-through one whole time step, meaning both kernels.
+## Profiling with Score-P
 
-For a clean comparison, use enough steps that the run is not dominated by
-startup, and keep `--frame-stride` high so I/O stays out of the way:
+Build instrumented kernels, then run:
 
 ```bash
-for level in v1 v2 v3 v4; do
-    FWMP_KERNEL=$level sbatch fwmp.sbatch --niter 5000 --frame-stride 5000
-done
-```
-
-## Scaling sweeps
-
-`submit_sweep.sh` submits one job per rank/thread configuration and collects
-the timings into a single CSV. You choose the kernel level; one sweep uses one
-level, so run it again with a different level to compare kernels.
-
-```bash
-./submit_sweep.sh v2 --dry-run      # see what it would submit
-./submit_sweep.sh v2                # submit
-./submit_sweep.sh --collect /scratch/$USER/fwmp/sweeps/sweep_<id>
-```
-
-Configurations live in the `CONFIGS` array at the top of the script, as
-`NODES TASKS_PER_NODE CPUS_PER_TASK`. They are grouped by the question each
-group answers: the best rank/thread split at a fixed core count, pure OpenMP
-scaling, pure MPI scaling, and scaling across nodes. Comment out the groups you
-do not need.
-
-Before submitting, the script asks `sinfo` how many cores a node has and skips
-anything that cannot be scheduled, rather than leaving it stuck in the queue.
-It also skips duplicate configurations, which would otherwise submit two jobs
-writing to the same directory. Set `FWMP_CORES_PER_NODE` if the detection is
-wrong.
-
-Every run writes `timing.csv` into its own directory, and `--collect` joins
-them with a `label` column. Runs that have not finished are reported on stderr
-and left out of the CSV, so you can collect a sweep while some jobs are still
-queued and run it again later.
-
-Since every configuration solves the same problem for the same number of steps,
-the `cells` column is identical across all of them. If it is not, something has
-changed between runs and the comparison is not measuring what you think.
-
-## Settings
-
-Six things are command-line options:
-
-```
---niter --frame-stride --downsample --compression --output-dir --kernel-lib
-```
-
-Everything else is a constant in the Settings block at the top of `fwmp.py`.
-That includes the sponge width, the source wavelet, and the write strategy.
-They all still work, they just are not worth a flag.
-
-The write strategy is three independent settings:
-
-`WRITE_MODE` is `batched`, `direct` or `async`. Batched buffers
-`FRAMES_PER_FLUSH` frames and writes them together. Direct writes one frame at a
-time and uses the least memory. Async hands frames to a writer thread pinned to
-the rank's last core so compute never blocks on I/O; it needs at least 2 cores
-per rank and refuses to start otherwise.
-
-`STAGE_ON_LOCAL_DISK` writes each rank's file to node-local disk and copies it
-to the output directory at the end, keeping the shared filesystem out of the
-time loop. `LOCAL_DISK_DIRECTORY` overrides `$TMPDIR`.
-
-`--compression` picks the HDF5 filter; `GZIP_LEVEL`, `BLOSC_LEVEL` and
-`TARGET_CHUNK_MEGABYTES` tune it. `none` is fastest to write and largest on
-disk, `blosc` is usually the best trade, `gzip` shrinks more but will bottleneck
-the time loop on a wide tile.
-
-## Output
-
-```
-output/job_<id>/
-├── elastic_wavefield.h5        virtual dataset, read this one
-└── rank_NNNN/
-    └── elastic_wavefield.h5    one rank's tile
-```
-
-The top-level file is an HDF5 virtual dataset. It copies nothing and points at
-the per-rank files with relative paths, so the whole `job_<id>` directory can be
-moved as a unit, but the rank files have to travel with it.
-
-Datasets are `vz` with shape `(frames, rows, columns)`, `vp`, and `time`.
-
-## Profiling
-
-```bash
+FWMP_SCOREP=1 FWMP_BUILD=1 sbatch fwmp.sbatch
 FWMP_SCOREP=1 sbatch fwmp.sbatch --niter 2000
 ```
 
-This recompiles the kernels through `scorep-gcc`, runs Python under Score-P, and
-writes traces to `output/job_<id>/scorep/`. Expect it to be slower; use a short
-run. If the `scorep` Python module is missing the job still runs, it just
-produces no trace.
+The launch uses `python -m scorep`, so the `scorep` Python package must be in `.venv`. Install it once with the module loaded:
 
-## Checking a run
-
-```python
-import h5py
-with h5py.File("output/job_12345/elastic_wavefield.h5") as f:
-    print(f["vz"].shape, dict(f.attrs))
+```bash
+module load gcc openmpi python scorep
+source .venv/bin/activate
+pip install scorep
 ```
 
-For compressed runs, `import hdf5plugin` before opening the file or HDF5 will
-not find the filter.
+Traces go to `output/job_<id>/scorep/`. Profiled runs are slower, so keep them short.
 
-## Notes
+For the tiled version:
 
-The simulation is bit-for-bit reproducible. Changing the rank count or the write
-strategy does not change a single value in `vz`, which makes any difference
-between two runs a real difference rather than noise.
+```bash
+sbatch --export=ALL,FWMP_BUILD=1,FWMP_SCOREP=1 fwmp_tiled.sbatch
+sbatch --export=ALL,FWMP_SCOREP=1 fwmp_tiled.sbatch
+```
 
-`--sponge-width` sets the absorbing boundary thickness in cells, default 240.
-The padded grid is the model plus twice that in each dimension, so it dominates
-memory use and runtime. Shrink it for quick tests, but know that a thin sponge
-reflects energy back into the model.
+## Running without SLURM
+
+For a quick test on a laptop or login node:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install numpy h5py segyio hdf5plugin mpi4py
+
+gcc -O3 -fopenmp -march=native -fPIC -shared \
+    -o libelastic_kernels_v2.so elastic_kernels_v2_simd.c
+
+OMP_NUM_THREADS=2 mpirun -n 2 python fwmp.py \
+    --niter 200 --frame-stride 50 --downsample 8 --output-dir test_out
+```
+
+## Common problems
+
+**`cannot load MPI library` or `libmpi.so.40: cannot open shared object file`**
+
+`mpi4py` was installed from a prebuilt wheel. Rebuild it against the cluster's MPI:
+
+```bash
+module purge && module load gcc openmpi python
+source .venv/bin/activate
+pip uninstall -y mpi4py
+MPICC=$(which mpicc) pip install --no-binary=mpi4py --no-cache-dir mpi4py
+```
+
+If `which mpicc` prints nothing, your MPI module has no compiler wrapper. Ask your cluster admins which module to load.
+
+**`missing SEG-Y model file(s)`**
+
+Put the three `.segy` files in `data/`.
+
+**`missing libelastic_kernels_vX.so`**
+
+Build the kernels: `FWMP_BUILD=1 sbatch fwmp.sbatch`.
+
+**`no .venv here`**
+
+Run the setup step once: `FWMP_SETUP=1 sbatch fwmp.sbatch --niter 200`.
+
+**`cannot write to output directory`**
+
+`DEFAULT_WORK_DIR` or `FWMP_WORK_DIR` points somewhere you can't write. See setup step 2.
+
+**`rank N ended up with an empty tile`**
+
+Too many ranks for the grid size. Use fewer ranks or a smaller `--downsample`.

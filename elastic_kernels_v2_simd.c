@@ -1,24 +1,22 @@
 /*
  * Level 2 of 4: let the compiler vectorise.
  *
- * Four changes over level 1, and the first two matter most:
+ * Four changes from level 1. The first two matter most.
  *
- *   restrict on every pointer. Without it the compiler has to assume sxx and
- *   vx might be the same memory, so it reloads after every store and gives up
- *   on vectorising. This one keyword is worth more than the rest combined.
+ *   restrict on every pointer. Without it, the compiler must assume sxx and vx
+ *   may share memory. It then reloads after every store and won't vectorise.
+ *   This one keyword gives most of the speedup.
  *
- *   #pragma omp simd on the inner loop, which is only useful once restrict has
- *   made vectorisation legal.
+ *   #pragma omp simd on the inner loop. It only helps once restrict makes
+ *   vectorising legal.
  *
- *   Row base offsets hoisted out of the inner loop, so the address is one add
- *   rather than a multiply-add per access.
+ *   Row offsets computed once per row, outside the inner loop.
  *
- *   schedule(static). The work per row is constant, so the default is probably
- *   static anyway, but saying so removes the doubt and makes thread-to-row
- *   mapping repeatable, which matters for NUMA placement across runs.
+ *   schedule(static). Every row costs the same, so static is likely the
+ *   default anyway. Setting it makes the thread-to-row mapping the same on
+ *   every run, which matters for NUMA placement.
  *
- * This is the kernel the repo has been using. Treat it as the baseline that
- * levels 3 and 4 have to beat.
+ * This is the default kernel. Levels 3 and 4 have to beat it.
  *
  * Build:
  *   gcc -O3 -fopenmp -march=native -fPIC -shared \

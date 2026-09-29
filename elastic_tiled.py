@@ -20,6 +20,33 @@ total_cores = int(os.environ.get("FWMP_TOTAL_CORES", str(size)))
 ds_legacy = int(os.environ.get("FWMP_DS", "1"))
 cpus_per_task = int(os.environ.get("SLURM_CPUS_PER_TASK", os.environ.get("OMP_NUM_THREADS", "1")))
 
+# Compression for the per-rank vz dataset. Earlier runs all used blosc (lz4).
+# gzip writes slower, but plain HDF5 tools can read it without hdf5plugin.
+# lz4 uses the plain LZ4 filter, not blosc, and ignores the level.
+# The level defaults to 4 for gzip and 3 otherwise, same as fwmp.py.
+compression = os.environ.get("FWMP_COMPRESSION", "blosc").strip().lower()
+if compression not in ("none", "gzip", "blosc", "lz4"):
+    raise SystemExit(
+        f"FWMP_COMPRESSION={compression!r}; use none, gzip, blosc or lz4"
+    )
+compression_level = int(os.environ.get(
+    "FWMP_COMPRESSION_LEVEL", "4" if compression == "gzip" else "3"
+))
+
+
+def compression_filter(kind, level):
+    """Return create_dataset arguments for the chosen compression, or {}."""
+    if kind == "none":
+        return {}
+    if kind == "gzip":
+        return dict(compression="gzip", compression_opts=level, shuffle=True)
+    if kind == "lz4":
+        return dict(**hdf5plugin.LZ4())
+    return dict(**hdf5plugin.Blosc(
+        cname="lz4", clevel=level, shuffle=hdf5plugin.Blosc.SHUFFLE
+    ))
+
+
 base_output_dir = os.environ["FWMP_BASE_OUTPUT_DIR"]
 rank_output_dir = os.path.join(base_output_dir, f"rank_{rank:04d}")
 
@@ -405,7 +432,7 @@ if has_physical_output:
         shape=(n_frames, local_nz_phys, local_nx_phys),
         dtype=np.float32,
         chunks=(1, chunk_z, chunk_x),
-        **hdf5plugin.Blosc(cname="lz4", clevel=3, shuffle=hdf5plugin.Blosc.SHUFFLE)
+        **compression_filter(compression, compression_level)
     )
     h5.create_dataset("vp", data=vp0[out_z0:out_z1, out_x0:out_x1].astype(np.float32))
 else:
@@ -434,6 +461,8 @@ attributes = {
     "dt": float(dt),
     "frame_stride": frame_stride,
     "n_frames": n_frames,
+    "compression": compression,
+    "compression_level": compression_level,
     "scale_mode": scale_mode,
     "total_cores": total_cores
 }
@@ -570,5 +599,6 @@ if rank == 0:
         vf.attrs["dt"] = float(dt)
         vf.attrs["frame_stride"] = frame_stride
         vf.attrs["n_frames"] = n_frames
+        vf.attrs["compression"] = compression
 
     print("done", flush=True)

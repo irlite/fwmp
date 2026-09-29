@@ -1,17 +1,17 @@
 #!/bin/bash
 #
-# Build and run the elastic wave simulation under SLURM.
+# Build and run the elastic wave simulation with SLURM.
 #
 #   sbatch fwmp.sbatch
 #   sbatch fwmp.sbatch --niter 2000 --compression blosc
-#   sbatch -N 4 --ntasks-per-node=2 fwmp.sbatch --stage-local --write-mode async
+#   sbatch -N 4 --ntasks-per-node=2 fwmp.sbatch --niter 2000
 #
-#   FWMP_WORK_DIR=/scratch/$USER/fwmp   where output goes, default is here
-#   FWMP_SETUP=1    build .venv, install dependencies, compile the kernels
-#   FWMP_BUILD=1    compile the kernels and exit, nothing else
-#   FWMP_SCOREP=1   run under Score-P, traces land next to the output
-#   FWMP_KERNEL=v3  which kernel optimisation level to run, v1 to v4
-#   FWMP_BLOCK_ROWS, FWMP_BLOCK_COLUMNS   tile shape for v3 and v4
+#   FWMP_WORK_DIR=/scratch/$USER/fwmp   output folder, overrides DEFAULT_WORK_DIR
+#   FWMP_SETUP=1    create .venv, install packages, build the kernels, then run
+#   FWMP_BUILD=1    build the kernels and exit
+#   FWMP_SCOREP=1   run under Score-P, traces go next to the output
+#   FWMP_KERNEL=v3  kernel level to run, v1 to v4, default v2
+#   FWMP_BLOCK_ROWS, FWMP_BLOCK_COLUMNS   tile size for v3 and v4
 #
 
 
@@ -27,7 +27,7 @@
 
 set -euo pipefail
 
-# Under sbatch, $0 points at a spool copy, so prefer the submit directory.
+# Under sbatch, $0 is a spool copy, so use the submit directory.
 PROJECT_ROOT="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 cd "$PROJECT_ROOT"
 
@@ -55,9 +55,8 @@ fi
 # ---------------------------------------------------------------------------
 # Building the kernels
 #
-# Runs with FWMP_BUILD=1 or as part of FWMP_SETUP=1, and never otherwise. Jobs
-# just use whatever is already there, so a sweep does not recompile once per
-# job or race to write the same file.
+# Only runs with FWMP_BUILD=1 or FWMP_SETUP=1. Other jobs use the existing
+# libraries, so sweep jobs don't all rebuild and overwrite the same file.
 # ---------------------------------------------------------------------------
 
 build_kernels() {
@@ -66,7 +65,7 @@ build_kernels() {
     local block_columns="${FWMP_BLOCK_COLUMNS:-512}"
 
     if [ "$USE_SCOREP" != "0" ]; then
-        # Score-P has to wrap the compiler to see inside the kernels at all.
+        # Score-P must wrap the compiler to see inside the kernels.
         compiler="scorep-gcc --openmp"
         suffix="_scorep"
     else
@@ -99,18 +98,13 @@ fi
 
 if [ "${FWMP_SETUP:-0}" != "0" ]; then
     echo "building .venv"
-    # --system-site-packages so a cluster-provided mpi4py, already built
-    # against the local MPI, is visible from inside the venv.
+    # --system-site-packages lets the venv use the cluster's mpi4py, which is
+    # already built against the local MPI.
     python -m venv --system-site-packages .venv
     source .venv/bin/activate
     python -m pip install --upgrade pip
 
-    # mpi4py is the one package that has to match the MPI srun uses, and it is
-    # the one that breaks. Recent pip wheels are prebuilt against a generic ABI
-    # and dlopen libmpi.so at import time, which fails the moment the cluster's
-    # MPI is not on the loader path. So: keep whatever the system already
-    # provides if it imports, and otherwise compile against the module's mpicc
-    # instead of downloading a wheel that will not match.
+    
     if python -c "from mpi4py import MPI" 2>/dev/null; then
         echo "mpi4py already works, leaving it alone"
     else
@@ -125,8 +119,7 @@ if [ "${FWMP_SETUP:-0}" != "0" ]; then
 
     python -m pip install numpy h5py segyio hdf5plugin
 
-    # Prove it works now, rather than finding out from every rank of a queued
-    # job an hour later.
+    # Check mpi4py now, not when a queued job fails on every rank.
     python -c "from mpi4py import MPI; print('mpi4py ok:', MPI.Get_library_version().splitlines()[0])"
 
     build_kernels
@@ -142,11 +135,9 @@ fi
 # C kernels
 # ---------------------------------------------------------------------------
 
-# Which optimisation level this job runs. FWMP_KERNEL=v3 to compare.
 KERNEL_LEVEL="${FWMP_KERNEL:-v2}"
 
-# Instrumented and plain builds get separate names so both can sit there at
-# once and you never have to rebuild when switching between them.
+
 if [ "$USE_SCOREP" != "0" ]; then
     KERNEL_SUFFIX="_scorep"
 else
@@ -169,15 +160,13 @@ fi
 # Threading
 # ---------------------------------------------------------------------------
 
-# One OpenMP team per rank, filling that rank's cores and staying put. Without
-# the binding, threads drift across sockets and the timings turn to noise.
+
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 export OMP_PROC_BIND=close
 export OMP_PLACES=cores
 export OMP_DYNAMIC=false
 
-# NumPy's backends would otherwise start their own threads and fight the kernels
-# for cores. There is no heavy linear algebra here, so one thread each is fine.
+
 export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
@@ -186,7 +175,7 @@ export NUMEXPR_NUM_THREADS=1
 # Launch
 # ---------------------------------------------------------------------------
 
-# The user's own --output-dir, if they passed one, comes later in "$@" and wins.
+# A --output-dir passed by the user comes later in "$@", so it wins.
 LAUNCH_COMMAND=(
     python -u fwmp.py
     --output-dir "$OUTPUT_DIRECTORY"
