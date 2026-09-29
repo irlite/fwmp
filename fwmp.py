@@ -151,7 +151,7 @@ def parse_arguments(argv=None):
         help="keep every Nth sample of the input models (default: %(default)s)",
     )
     parser.add_argument(
-        "--compression", choices=("none", "gzip", "blosc", "lz4"), default="none",
+        "--compression", choices=("none", "gzip", "blosc", "lz4"), default="lz4",
         help="HDF5 filter for the vz dataset (default: %(default)s)",
     )
     parser.add_argument(

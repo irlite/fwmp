@@ -17,7 +17,7 @@
 #   FWMP_TILE_ROWS  tile height in rows, default 64
 #   FWMP_NITER      steps, default 500 under Score-P, 50000 otherwise
 #   FWMP_MARCH      compiler target, default native
-#   FWMP_COMPRESSION  vz compression, default blosc (none|gzip|blosc|lz4)
+#   FWMP_COMPRESSION  vz compression, default lz4 (none|gzip|blosc|lz4)
 #   FWMP_COMPRESSION_LEVEL  compression level, default 4 for gzip, 3 otherwise
 
 #SBATCH --partition=scc-cpu
@@ -126,7 +126,7 @@ export FWMP_TILE_ROWS="${FWMP_TILE_ROWS:-64}"
 
 # vz compression. Earlier tiled runs all used blosc. gzip writes slower, but
 # plain HDF5 tools can open it without hdf5plugin.
-export FWMP_COMPRESSION="${FWMP_COMPRESSION:-blosc}"
+export FWMP_COMPRESSION="${FWMP_COMPRESSION:-lz4}"
 
 # Score-P records many events per step, so its runs default to fewer steps.
 if [ "$USE_SCOREP" != "0" ]; then
