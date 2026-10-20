@@ -1,5 +1,7 @@
 # fwmp
 
+This is the code for "Parallel Seismic Wave Forward Modeling", see the [techincal report](https://hps.vi4io.org/_media/teaching/summer_term_2026/stud/pchpc/group_3.pdf) and [slideset](https://hps.vi4io.org/_media/teaching/summer_term_2026/stud/pchpc/group_3_presentation.pdf) for more information.
+
 ## Setup
 
 First create and install the Python environment:
